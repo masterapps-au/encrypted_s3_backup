@@ -1,0 +1,26 @@
+{
+  "src": {
+    "aws_access_key_id": "my_access_key",
+    "aws_secret_access_key": "my_secret_key",
+    "s3_bucket": "my-s3-bucket",
+    "base_path": "optional/backup/files/from/here/"
+  },
+  "dest": {
+    "aws_access_key_id": "my_minio_access_key",
+    "aws_secret_access_key": "my_minio_secret_key",
+    "s3_bucket": "my-minio-bucket",
+    "base_path": "optional/backup/files/to/here/",
+    "endpoint_url": "https://minio.my-domain.com",
+    "signature_version": "s3v4",
+    "region_name": "us-east-1"
+  },
+  "restore": {
+    "local_path": "/restore/to/here"
+  },
+  "encryption_password": "my-encryption-password",
+  "backup_processes": 5,
+  "restore_processes": 8,
+  "ignore_regex": [
+    "^optional/ignore/files/in/this/folder/"
+  ]
+}
