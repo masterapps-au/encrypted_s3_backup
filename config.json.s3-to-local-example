@@ -14,6 +14,7 @@
   "encryption_password": "my-encryption-password",
   "backup_processes": 5,
   "restore_processes": 8,
+  "deleted_keep_days": null,
   "ignore_regex": [
     "^optional/ignore/files/in/this/folder/"
   ]

@@ -3,6 +3,7 @@
 import argparse
 import base36
 from botocore.client import Config
+from botocore.exceptions import ClientError
 import boto3
 import calendar
 from collections import namedtuple
@@ -32,6 +33,12 @@ class LocalStorage(object):
     """
     def __init__(self, local_path):
         self.path = Path(local_path)
+    
+    def init(self):
+        """
+        Initialise the storage. Only called once per run.
+        """
+        pass    
     
     def list(self, extension=None):
         """
@@ -106,7 +113,18 @@ class S3Storage(object):
             }
         self.s3_bucket = s3_bucket
         self.base_path = PurePath((base_path or '').lstrip('/'))
-        
+    
+    def init(self):
+        """
+        Initialise the storage. Only called once per run.
+        """
+        # create the bucket if it doesn't exist
+        bucket = self._bucket()
+        try:
+            bucket.meta.client.head_bucket(Bucket=bucket.name)
+        except ClientError:
+            bucket.meta.client.create_bucket(Bucket=bucket.name)
+    
     def list(self, extension=None):
         """
         Returns a list of files stored by the storage, relative to the storage root.
@@ -233,6 +251,24 @@ def get_aes_cipher(aes_key, nonce=None):
     return AES.new(aes_key, AES.MODE_GCM, nonce)
 
 
+def date_to_int(d):
+    """
+    Represents a date object as an integer, or 0 if None.
+    """
+    if d is None:
+        return 0
+    return int(d.strftime('%Y%m%d'))
+
+
+def int_to_date(d):
+    """
+    Converts an integer representation of a date to a date object or None.
+    """
+    if d == 0:
+        return None
+    return datetime.strptime(str(d), '%Y%m%d').date()
+
+
 def download_object(index, config, src_storage, dest_storage, original_state):
     """
     Downloads an object from s3, encrypts it using AES-256-GCM and stores it on the storage.
@@ -288,14 +324,15 @@ def do_backup(config, src_storage, dest_storage):
             for s in (encrypted_filename_to_encrypted_file_state(f) 
                 for f in dest_storage.list(extension=ENCRYPTED_EXTENSION))}
         src_storage_files = set()
+        ignore_regexes = [re.compile(r) for r in config.get('ignore_regex', [])]
         
         print('Listing files on source storage and queuing downloads...')
-        
-        ignore_regexes = [re.compile(r) for r in config.get('ignore_regex', [])]
         
         for i, original_state in enumerate(src_storage.list_iter()):
             if any(r.match(original_state.storage_filename) for r in ignore_regexes):
                 continue # the user has requested to ignore
+            if original_state.storage_filename in src_storage_files:
+                continue # in case the storage lists the file twice (unlikely)
             
             src_storage_files.add(original_state.storage_filename)
             encrypted_state = dest_storage_files.get(original_state.storage_filename)
@@ -310,27 +347,39 @@ def do_backup(config, src_storage, dest_storage):
                 
                 # remove any old version of the file
                 if encrypted_state is not None:
-                    print('[{0}] Removing old {1} ({2} bytes, modified {3}, deleted {4})...'.format(
+                    print('[{0}] Deleting old {1} ({2} bytes, modified {3}, deleted {4})...'.format(
                         i + 1, original_state.storage_filename, encrypted_state.original_size, 
                         datetime.utcfromtimestamp(encrypted_state.last_modified), 
                         encrypted_state.deleted_date))
                     dest_storage.remove(encrypted_state.encrypted_filename)
-                    del dest_storage_files[original_state.storage_filename]
             
             # if the file has been deleted, then mark it as not deleted
             elif encrypted_state.deleted_date:
-                print('[{0}] Undeleting {1}...'.format(i + 1, original_state.storage_filename))
+                print('[{0}] Marking as undeleted {1}...'.format(i + 1, 
+                    original_state.storage_filename))
                 dest_storage.rename(encrypted_state.encrypted_filename, 
                     encrypted_file_state_to_encrypted_filename(encrypted_state, deleted_date=0))
         
         # mark all missing files that exist on the storage as deleted
-        today = int(date.today().strftime('%Y%m%d'))
+        today = date.today()
+        today_int = date_to_int(today)
+        deleted_keep_days = config.get('deleted_keep_days')
         
-        for s3_key in set(dest_storage_files) - src_storage_files:
-            print('[{0}] Deleting {1}...'.format(i + 1, original_state.storage_filename))
-            encrypted_state = dest_storage_files[s3_key]
-            dest_storage.rename(encrypted_state.encrypted_filename,
-                encrypted_file_state_to_encrypted_filename(encrypted_state, deleted_date=today))
+        for original_filename in set(dest_storage_files) - src_storage_files:
+            encrypted_state = dest_storage_files[original_filename]
+            
+            if encrypted_state.deleted_date:
+                # previously deleted, so check whether its expired and is to be permanently deleted
+                if deleted_keep_days is not None:
+                    days = (today - int_to_date(encrypted_state.deleted_date)).days
+                    if days > deleted_keep_days:
+                        print('[{0}] Permanently deleting {1}...'.format(i + 1, original_filename))
+                        dest_storage.remove(encrypted_state.encrypted_filename)
+            else:
+                print('[{0}] Marking as deleted {1}...'.format(i + 1, original_filename))
+                dest_storage.rename(encrypted_state.encrypted_filename,
+                    encrypted_file_state_to_encrypted_filename(encrypted_state, 
+                        deleted_date=today_int))
         
         # wait for all processes to finish and raise any exceptions they raise
         print('Listing complete! Waiting for downloads to finish...')
@@ -439,6 +488,10 @@ def main():
         restore_storage = LocalStorage(**config['restore'])
     elif config['restore'].get('s3_bucket'):
         restore_storage = S3Storage(**config['restore'])
+    
+    src_storage.init()
+    dest_storage.init()
+    restore_storage.init()
     
     if args.verify:
         do_restore(config, dest_storage, verify=True)

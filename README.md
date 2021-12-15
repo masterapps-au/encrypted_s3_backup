@@ -89,6 +89,9 @@ where to restore to, respectively. Each storage can be either a LocalStorage, or
 
 `restore_processes` - Optional. The number of processes to use to restore files in parallel. Default 8.
 
+`deleted_keep_days` - Optional. The number of days until deleted files are permanently deleted from 
+the destination (backup). Defaults to null (keep forever).
+
 `ignore_regex` - Optional. A list of regular expressions that can be used to ignore files or 
 folders on the source storage.
 
