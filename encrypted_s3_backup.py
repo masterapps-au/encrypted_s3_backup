@@ -411,10 +411,9 @@ def main():
     """
     Runs the backup.
     """
-    with open('config.json', 'rb') as f:
-        config = json.load(f)
-    
     parser = argparse.ArgumentParser()
+    parser.add_argument('--config', default='config.json',
+        help='Specify the path to the config file.')
     parser.add_argument('--verify', action='store_true',
         help='Verifies the integrity of a backup by decrypting and verifying hashes.')
     parser.add_argument('--restore', action='store_true',
@@ -422,6 +421,9 @@ def main():
     parser.add_argument('--restore-deleted', action='store_true',
         help='Restore deleted files during the restore. Not enabled by default.')
     args = parser.parse_args()
+    
+    with open(args.config, 'rb') as f:
+        config = json.load(f)
     
     if config['src'].get('local_path'):
         src_storage = LocalStorage(**config['src'])
