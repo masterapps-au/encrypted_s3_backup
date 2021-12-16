@@ -12,8 +12,9 @@ from Crypto.Hash import SHA512
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 from datetime import datetime, date
+import gzip
 import hashlib
-from io import BytesIO
+from io import BytesIO, SEEK_CUR, SEEK_END
 import json
 import lzma
 from multiprocessing import Pool
@@ -21,12 +22,27 @@ import os
 from pathlib import Path, PurePath
 import re
 import sys
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, _TemporaryFileWrapper
 
 
-ENCRYPTED_EXTENSION = 'xz-aes'
+ENCRYPTED_EXTENSION = 'enc'
+CHUNK_SIZE = 10 * 1024 * 1024 # 10MB chunks
+IN_MEMORY_MAX_SIZE = 100 * 1024 * 1024 # process files <= 100MB entirely in memory
+LZMA_MAX_SIZE = 10 * 1024 * 1024 # compress files > 10MB using gzip instead of lzma (for speed)
 
 
+#
+# Tuples
+#
+StorageFileState = namedtuple('StorageFileState', ['storage_filename', 'last_modified', 'size'])
+
+EncryptedFileState = namedtuple('EncryptedFileState', ['encrypted_filename', 'original_filename', 
+    'last_modified', 'original_size', 'original_md5', 'deleted_date'], defaults=[None] * 6)
+
+
+#
+# Classes
+#
 class LocalStorage(object):
     """
     Storage for the local file system. 
@@ -49,18 +65,18 @@ class LocalStorage(object):
             for p in self.path.rglob('*.%s' % extension if extension else '*')
             if not p.is_dir()]
     
-    def list_iter(self):
+    def list_iter(self, extension=None):
         """
         Iterates through the list of files stored by the storage and yields StorageFileState.
         """
-        for storage_filename in self.list():
+        for storage_filename in self.list(extension=extension):
             s = (self.path / storage_filename).stat()
             yield StorageFileState(
                 storage_filename=storage_filename,
                 last_modified=int(s.st_mtime),
                 size=s.st_size)
     
-    def write(self, storage_filename, data):
+    def write(self, storage_filename, f):
         """
         Atomically write the data to the storage.
         """
@@ -68,9 +84,17 @@ class LocalStorage(object):
         p = self.path / storage_filename
         p.parent.mkdir(parents=True, exist_ok=True)
         
-        # store the data in a temporary file and flush the data to disk
-        f = NamedTemporaryFile(delete=False)
-        f.write(data)
+        if isinstance(f, _TemporaryFileWrapper):
+            pass # already a temporary file, so just rename it
+        else:
+            # store the data in a temporary file
+            f.seek(0)
+            f2 = NamedTemporaryFile(delete=False)
+            for chunk in read_chunks(f):
+                f2.write(chunk)
+            f = f2
+        
+        # ensure the data is flushed to disk before we rename
         f.flush()
         os.fsync(f.fileno()) 
         f.close()
@@ -78,12 +102,12 @@ class LocalStorage(object):
         # atomically rename the temporary file to our destination file
         os.rename(f.name, str(p))
     
-    def read(self, storage_filename):
+    def read(self, storage_filename, size_hint):
         """
-        Returns the data of the storage file.
+        Returns the data of the storage file as a file-like object.
+        The file-like object must be compatible with close_temp_io.
         """
-        with open(str(self.path / storage_filename), 'rb') as f:
-            return f.read()
+        return open(str(self.path / storage_filename), 'rb')
     
     def rename(self, from_storage_filename, to_storage_filename):
         """
@@ -129,33 +153,33 @@ class S3Storage(object):
         """
         Returns a list of files stored by the storage, relative to the storage root.
         """
-        extension = '.' + extension if extension else None
-        return [v[0] for v in self._list()
-            if extension is None or os.path.splitext(v[0])[1] == extension]
+        return [v[0] for v in self._list(extension=extension)]
     
-    def list_iter(self):
+    def list_iter(self, extension=None):
         """
         Iterates through the list of files stored by the storage and yields StorageFileState.
         """
-        for storage_filename, obj in self._list():
+        for storage_filename, obj in self._list(extension=extension):
             yield StorageFileState(
                 storage_filename=storage_filename,
                 last_modified=calendar.timegm(obj.last_modified.utctimetuple()),
                 size=obj.size)
     
-    def write(self, storage_filename, data):
+    def write(self, storage_filename, f):
         """
         Atomically write the data to the storage.
         """
-        self._bucket().upload_fileobj(BytesIO(data), str(self.base_path / storage_filename))
+        f.seek(0)
+        self._bucket().upload_fileobj(f, str(self.base_path / storage_filename))
         
-    def read(self, storage_filename):
+    def read(self, storage_filename, size_hint):
         """
-        Returns the data of the storage file.
+        Returns the data of the storage file as a file-like object.
+        The file-like object must be compatible with close_temp_io.
         """
-        data_io = BytesIO()
-        self._bucket().download_fileobj(str(self.base_path / storage_filename), data_io)
-        return data_io.getvalue()
+        f = open_temp_io(size_hint)
+        self._bucket().download_fileobj(str(self.base_path / storage_filename), f)
+        return f
     
     def rename(self, from_storage_filename, to_storage_filename):
         """
@@ -181,124 +205,55 @@ class S3Storage(object):
             config=Config(signature_version=signature_version) if signature_version else None))
         return s3.Bucket(self.s3_bucket)
     
-    def _list(self):
+    def _list(self, extension=None):
         """
         Internally used by list and list_iter.
         """
+        extension = '.' + extension if extension else None
+        
         if str(self.base_path) != '.':
             it = self._bucket().objects.filter(Prefix=str(self.base_path) + '/')
         else:
             it = self._bucket().objects.all()
-            
+        
         for obj in it:
             if obj.key.endswith('/'):
                 continue # ignore folders
-            yield str(PurePath(obj.key).relative_to(self.base_path)), obj    
+            p = PurePath(obj.key).relative_to(self.base_path)
+            if extension is None or p.suffix == extension:
+                yield str(p), obj
 
 
-StorageFileState = namedtuple('StorageFileState', ['storage_filename', 'last_modified', 'size'])
-
-EncryptedFileState = namedtuple('EncryptedFileState', ['encrypted_filename', 'original_filename', 
-    'last_modified', 'original_size', 'original_md5', 'deleted_date'], defaults=[None] * 6)
-
-
-def encrypted_filename_to_encrypted_file_state(encrypted_filename):
+#
+# Main functions
+#
+def backup_object(index, config, src_storage, dest_storage, original_state):
     """
-    Splits the filename of an encrypted file into an EncryptedFileState.
-    The state of an encrypted file is stored within it's filename.
+    Downloads an object from the source storage, compresses and then encrypts 
+    and stores it on the destination storage.
     """
-    original_filename, last_modified, original_size, original_md5, deleted_date, extension = \
-        encrypted_filename.rsplit('.', 5)
-    assert extension == ENCRYPTED_EXTENSION
-    return EncryptedFileState(encrypted_filename=encrypted_filename,
-        original_filename=original_filename,
-        last_modified=base36.loads(last_modified), 
-        original_size=base36.loads(original_size), 
-        original_md5=base36.loads(original_md5),
-        deleted_date=base36.loads(deleted_date))
-
-
-def encrypted_file_state_to_encrypted_filename(encrypted_state=None, **kwargs):
-    """
-    Returns the filename that should be used to store the encrypted file on the storage.
-    """
-    if encrypted_state and kwargs:
-        encrypted_state = EncryptedFileState(**dict(encrypted_state._asdict(), **kwargs))
-    elif kwargs:
-        encrypted_state = EncryptedFileState(**kwargs)
-    
-    return '.'.join([
-        encrypted_state.original_filename,
-        base36.dumps(encrypted_state.last_modified),
-        base36.dumps(encrypted_state.original_size),
-        base36.dumps(encrypted_state.original_md5),
-        base36.dumps(encrypted_state.deleted_date),
-        ENCRYPTED_EXTENSION,
-        ])
-
-
-def get_aes_key(encryption_password, salt):
-    """
-    Derives an AES key from an encryption password and salt.
-    """
-    return PBKDF2(encryption_password, salt, 32, count=100000, hmac_hash_module=SHA512)
-
-
-def get_aes_cipher(aes_key, nonce=None):
-    """
-    Returns the AES-GCM cipher to use for a given AES key.
-    """
-    return AES.new(aes_key, AES.MODE_GCM, nonce)
-
-
-def date_to_int(d):
-    """
-    Represents a date object as an integer, or 0 if None.
-    """
-    if d is None:
-        return 0
-    return int(d.strftime('%Y%m%d'))
-
-
-def int_to_date(d):
-    """
-    Converts an integer representation of a date to a date object or None.
-    """
-    if d == 0:
-        return None
-    return datetime.strptime(str(d), '%Y%m%d').date()
-
-
-def download_object(index, config, src_storage, dest_storage, original_state):
-    """
-    Downloads an object from s3, encrypts it using AES-256-GCM and stores it on the storage.
-    """
-    print('[{0}] Downloading {1}...'.format(index + 1, original_state.storage_filename))
+    print('[{0}] Backing up {1}...'.format(index + 1, original_state.storage_filename))
     
     # download/read the original file from the source storage
-    original_data = src_storage.read(original_state.storage_filename)
+    original_io = src_storage.read(original_state.storage_filename, original_state.size)
     
     # determine the size and md5 of the data before encrypted
-    assert original_state.size == len(original_data), \
+    original_md5, original_size = md5_hash_and_size(original_io)
+    
+    assert original_state.size == original_size, \
         'Download failed for [%s]. Size mismatch. Expected %s, got %s!' % (
-            original_state.storage_filename, original_state.size, len(original_data))
-    original_md5 = int(hashlib.md5(original_data).hexdigest(), 16)
+            original_state.storage_filename, original_state.size, original_size)
     
     # compress the file using lzma (xz)
-    compressed_data = lzma.compress(original_data)
-    del original_data
-    
-    # derive an encryption key from the users password 
-    salt = get_random_bytes(16)
-    aes_key = get_aes_key(config['encryption_password'], salt)
+    compressed_io = open_temp_io(original_size)
+    compress(original_io, compressed_io, 
+        lzma_level=config.get('lzma_level', 6), gzip_level=config.get('gzip_level', 6))
+    close_temp_io(original_io)
     
     # encrypt the data using aes-256-gcm
-    cipher = get_aes_cipher(aes_key)
-    ciphertext, tag = cipher.encrypt_and_digest(compressed_data)
-    del compressed_data
-    
-    encrypted_io = BytesIO()
-    [encrypted_io.write(x) for x in (salt, cipher.nonce, tag, ciphertext)]
+    encrypted_io = open_temp_io(io_size(compressed_io))
+    aes_encrypt(compressed_io, encrypted_io, config['encryption_password'])
+    close_temp_io(compressed_io)
     
     # write the encrypted file to the storage
     encrypted_filename = encrypted_file_state_to_encrypted_filename(
@@ -307,7 +262,8 @@ def download_object(index, config, src_storage, dest_storage, original_state):
         original_size=original_state.size, 
         original_md5=original_md5,
         deleted_date=0)
-    dest_storage.write(encrypted_filename, encrypted_io.getvalue())
+    dest_storage.write(encrypted_filename, encrypted_io)
+    close_temp_io(encrypted_io)
 
 
 def do_backup(config, src_storage, dest_storage):
@@ -342,7 +298,7 @@ def do_backup(config, src_storage, dest_storage):
             if (encrypted_state is None or 
                     encrypted_state.original_size != original_state.size or 
                     encrypted_state.last_modified != original_state.last_modified):
-                processes.append(pool.apply_async(download_object,
+                processes.append(pool.apply_async(backup_object,
                     [i, config, src_storage, dest_storage, original_state]))
                 
                 # remove any old version of the file
@@ -382,40 +338,39 @@ def do_backup(config, src_storage, dest_storage):
                         deleted_date=today_int))
         
         # wait for all processes to finish and raise any exceptions they raise
-        print('Listing complete! Waiting for downloads to finish...')
+        print('Listing complete! Waiting for backups to finish...')
         for process in processes:
             process.get() # re-raises any exceptions
 
 
-def restore_object(index, config, dest_storage, encrypted_state, restore_storage=None, verify=False):
+def restore_object(index, config, dest_storage, encrypted_state, encrypted_size, 
+        restore_storage=None, verify=False):
     """
-    Restores an object from the storage to the local file system.
+    Restores an object from the destination storage to the restore storage.
     """
     print('[{0}] Restoring {1}...'.format(index + 1, encrypted_state.original_filename))
     
-    # read the encrypted file and break it into it's parts
-    encrypted_io = BytesIO(dest_storage.read(encrypted_state.encrypted_filename))
-    salt, nonce, tag, ciphertext = [encrypted_io.read(x) for x in (16, 16, 16, -1)]
-    del encrypted_io
-    
-    # derive an encryption key from the users password 
-    aes_key = get_aes_key(config['encryption_password'], salt)
+    # read the encrypted file
+    encrypted_io = dest_storage.read(encrypted_state.encrypted_filename, encrypted_size)
     
     # decrypt the data using aes-256-gcm
-    cipher = get_aes_cipher(aes_key, nonce)
-    compressed_data = cipher.decrypt_and_verify(ciphertext, tag)
+    compressed_io = open_temp_io(io_size(encrypted_io))
+    aes_decrypt(encrypted_io, compressed_io, config['encryption_password'])
+    close_temp_io(encrypted_io)
     
     # decompress the file using lzma (xz)
-    original_data = lzma.decompress(compressed_data)
+    original_io = open_temp_io(io_size(compressed_io))
+    decompress(compressed_io, original_io)
+    close_temp_io(compressed_io)
     
     # verify the contents
     error = None
-    original_md5 = int(hashlib.md5(original_data).hexdigest(), 16)
+    original_md5, original_size = md5_hash_and_size(original_io)
     
-    if encrypted_state.original_size != len(original_data):
+    if encrypted_state.original_size != original_size:
         error = 'Restore failed for [%s]. Size mismatch. Expected %s, got %s!' % (
-            encrypted_state.original_filename, encrypted_state.original_size, len(original_data))
-    
+            encrypted_state.original_filename, encrypted_state.original_size, original_size)
+        
     elif encrypted_state.original_md5 != original_md5:
         error = 'Restore failed for [%s]. MD5 mismatch. Expected %s, got %s!' % (
             encrypted_state.original_filename, encrypted_state.original_md5, original_md5)
@@ -431,7 +386,9 @@ def restore_object(index, config, dest_storage, encrypted_state, restore_storage
         print('[{0}] OK'.format(index + 1))
     else:
         # save the file to it's destination
-        restore_storage.write(encrypted_state.original_filename, original_data)
+        restore_storage.write(encrypted_state.original_filename, original_io)
+    
+    close_temp_io(original_io)
 
 
 def do_restore(config, dest_storage, restore_storage=None, restore_deleted=False, verify=False):
@@ -443,19 +400,229 @@ def do_restore(config, dest_storage, restore_storage=None, restore_deleted=False
         
         print('Listing files on destination storage...')
         
-        for i, encrypted_state in enumerate([encrypted_filename_to_encrypted_file_state(f) 
-                for f in dest_storage.list(extension=ENCRYPTED_EXTENSION)]):
+        for i, storage_state in enumerate(dest_storage.list_iter(extension=ENCRYPTED_EXTENSION)):
+            encrypted_state = encrypted_filename_to_encrypted_file_state(
+                storage_state.storage_filename)
+            
             if not verify and encrypted_state.deleted_date and not restore_deleted:
                 continue # skip deleted (except when verifying)
-            processes.append(pool.apply_async(restore_object,
-                [i, config, dest_storage, encrypted_state, restore_storage, verify]))            
+            
+            processes.append(pool.apply_async(restore_object, [i, config, dest_storage, 
+                encrypted_state, storage_state.size, restore_storage, verify]))            
         
         # wait for all processes to finish and raise any exceptions they raise
-        print('Listing complete! Waiting for decryption to finish...')
+        print('Listing complete! Waiting for restoration to finish...')
         for process in processes:
-            process.get() # re-raises any exceptions            
+            process.get() # re-raises any exceptions        
 
 
+#
+# Utility functions
+#
+def encrypted_filename_to_encrypted_file_state(encrypted_filename):
+    """
+    Splits the filename of an encrypted file into an EncryptedFileState.
+    The state of an encrypted file is stored within it's filename.
+    """
+    original_filename, last_modified, original_size, original_md5, deleted_date, extension = \
+        encrypted_filename.rsplit('.', 5)
+    assert extension == ENCRYPTED_EXTENSION
+    return EncryptedFileState(encrypted_filename=encrypted_filename,
+        original_filename=original_filename,
+        last_modified=base36.loads(last_modified), 
+        original_size=base36.loads(original_size), 
+        original_md5=base36.loads(original_md5),
+        deleted_date=base36.loads(deleted_date))
+
+
+def encrypted_file_state_to_encrypted_filename(encrypted_state=None, **kwargs):
+    """
+    Returns the filename that should be used to store the encrypted file on the storage.
+    """
+    if encrypted_state and kwargs:
+        encrypted_state = EncryptedFileState(**dict(encrypted_state._asdict(), **kwargs))
+    elif kwargs:
+        encrypted_state = EncryptedFileState(**kwargs)
+    
+    return '.'.join([
+        encrypted_state.original_filename,
+        base36.dumps(encrypted_state.last_modified),
+        base36.dumps(encrypted_state.original_size),
+        base36.dumps(encrypted_state.original_md5),
+        base36.dumps(encrypted_state.deleted_date),
+        ENCRYPTED_EXTENSION,
+        ])
+
+
+def read_chunks(f):
+    """
+    Reads in chunks of a file and yields the chunk.
+    """
+    while True:
+        data = f.read(CHUNK_SIZE)
+        if not data:
+            break
+        yield data
+
+
+def io_size(f):
+    """
+    Returns the file size for a given file-like object.
+    """
+    f.seek(0, SEEK_END)
+    return f.tell()
+
+
+def open_temp_io(size_hint):
+    """
+    Opens a temporary file-like object depending on the size of the data to be stored.
+    """
+    if size_hint <= IN_MEMORY_MAX_SIZE:
+        return BytesIO()
+    else:
+        return NamedTemporaryFile(delete=False)
+
+
+def close_temp_io(f):
+    """
+    Closes a temporary file-like object opened using open_temp_io.
+    """
+    f.close()
+    if isinstance(f, _TemporaryFileWrapper) and not f.delete and os.path.exists(f.name):
+        os.remove(f.name)
+
+
+def md5_hash_and_size(f):
+    """
+    Calculates the MD5 hash of a file-like object (as an integer), and the size of the file in bytes.
+    """
+    f.seek(0)
+    
+    h = hashlib.md5()
+    size = 0
+    for chunk in read_chunks(f):
+        h.update(chunk)
+        size += len(chunk)
+    
+    return int(h.hexdigest(), 16), size
+
+
+def compress(from_io, to_io, lzma_level=6, gzip_level=6):
+    """
+    Compresses a file-like object into another file-like object using LZMA (XZ) if the file
+    is small, and GZIP if the file is greater than LZMA_MAX_SIZE.
+    """
+    size = io_size(from_io)
+    
+    from_io.seek(0)
+    to_io.seek(0)
+    
+    if size <= LZMA_MAX_SIZE:
+        with lzma.LZMAFile(to_io, mode='wb', preset=lzma_level) as f:
+            for chunk in read_chunks(from_io):
+                f.write(chunk)
+    else:
+        with gzip.GzipFile(fileobj=to_io, mode='wb', compresslevel=gzip_level) as f:
+            for chunk in read_chunks(from_io):
+                f.write(chunk)
+
+
+def decompress(from_io, to_io):
+    """
+    Decompresses a file-like object into another file-like object using LZMA or GZIP.
+    """
+    from_io.seek(0)
+    magic_number = from_io.read(2)
+    from_io.seek(0)
+    to_io.seek(0)
+    
+    if magic_number == b'\x1f\x8b':
+        with gzip.GzipFile(fileobj=from_io, mode='rb') as f:
+            for chunk in read_chunks(f):
+                to_io.write(chunk)
+    else:
+        with lzma.LZMAFile(from_io, mode='rb') as f:
+            for chunk in read_chunks(f):
+                to_io.write(chunk)
+
+
+def get_aes_key(encryption_password, salt):
+    """
+    Derives an AES key from an encryption password and salt.
+    """
+    return PBKDF2(encryption_password, salt, 32, count=100000, hmac_hash_module=SHA512)
+
+
+def get_aes_cipher(aes_key, nonce=None):
+    """
+    Returns the AES-GCM cipher to use for a given AES key.
+    """
+    return AES.new(aes_key, AES.MODE_GCM, nonce)
+
+
+def aes_encrypt(from_io, to_io, encryption_password):
+    """
+    Encrypts a file-like object into another file-like object using AES.
+    """
+    from_io.seek(0)
+    to_io.seek(0)
+    
+    salt = get_random_bytes(16)
+    aes_key = get_aes_key(encryption_password, salt)
+    cipher = get_aes_cipher(aes_key)
+    
+    to_io.write(salt)
+    to_io.write(cipher.nonce)
+    to_io.seek(16, SEEK_CUR) # leave 16 bytes for the digest
+    
+    for chunk in read_chunks(from_io):
+        to_io.write(cipher.encrypt(chunk))
+    
+    to_io.seek(32)
+    to_io.write(cipher.digest())
+
+
+def aes_decrypt(from_io, to_io, encryption_password):
+    """
+    Decrypts a file-like object into another file-like object using AES.
+    """
+    from_io.seek(0)
+    to_io.seek(0)
+    
+    salt = from_io.read(16)
+    nonce = from_io.read(16)
+    digest = from_io.read(16)
+    
+    aes_key = get_aes_key(encryption_password, salt)
+    cipher = get_aes_cipher(aes_key, nonce)
+    
+    for chunk in read_chunks(from_io):
+        to_io.write(cipher.decrypt(chunk))
+    
+    cipher.verify(digest)
+
+
+def date_to_int(d):
+    """
+    Represents a date object as an integer, or 0 if None.
+    """
+    if d is None:
+        return 0
+    return int(d.strftime('%Y%m%d'))
+
+
+def int_to_date(d):
+    """
+    Converts an integer representation of a date to a date object or None.
+    """
+    if d == 0:
+        return None
+    return datetime.strptime(str(d), '%Y%m%d').date()
+
+
+#
+# Main
+#
 def main():
     """
     Runs the backup.
@@ -489,16 +656,16 @@ def main():
     elif config['restore'].get('s3_bucket'):
         restore_storage = S3Storage(**config['restore'])
     
-    src_storage.init()
     dest_storage.init()
-    restore_storage.init()
     
     if args.verify:
         do_restore(config, dest_storage, verify=True)
     elif args.restore:
+        restore_storage.init()
         do_restore(config, dest_storage, restore_storage=restore_storage, 
             restore_deleted=args.restore_deleted)
     else:
+        src_storage.init()
         do_backup(config, src_storage, dest_storage)
     
     print('Done!')

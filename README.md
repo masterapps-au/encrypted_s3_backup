@@ -1,8 +1,8 @@
 # encrypted_s3_backup
 
 encrypted_s3_backup is a fast multi-threaded backup script that backs up files in a 
-compressed (XZ) and encrypted format (AES-256-GCM). Files can be backed up to or from S3 or local 
-storage. It requires Python 3.5+.
+compressed (XZ/GZIP) and encrypted format (AES-256-GCM). Files can be backed up to or from S3 or 
+local storage. It requires Python 3.5+.
 
 It has the following features:
 
@@ -13,9 +13,13 @@ It has the following features:
 - It uses no state files, lock files, databases, or metadata. Everything is stored in the 
 destination (backup) filename. This makes it file system agnostic and ensures writes are atomic.
 
+- Handles files of unlimited size by streaming all large operations to disk (> 100MB).
+
+- Compresses small files (<10MB) using XZ, and large files using GZIP (for speed).
+
 - The format of the destination (backup) filename is:
 
-`[original file name].[last modified date base36].[original file size base36].[original md5 base36].[deleted date (or 0) base36].xz-aes`
+`[original file name].[last modified date base36].[original file size base36].[original md5 base36].[deleted date (or 0) base36].enc`
 
 eg.
 
@@ -94,6 +98,10 @@ the destination (backup). Defaults to null (keep forever).
 
 `ignore_regex` - Optional. A list of regular expressions that can be used to ignore files or 
 folders on the source storage.
+
+`lzma_level` - Optional. Compression level for LZMA when compressing files <=10MB. Default 6. 1 is fastest, 9 is slowest.
+
+`gzip_level` - Optional. Compression level for GZIP when compressing files >10MB. Default 6. 1 is fastest, 9 is slowest.
 
 
 ## License
