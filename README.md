@@ -23,7 +23,7 @@ destination (backup) filename. This makes it file system agnostic and ensures wr
 
 eg.
 
-`mypicture.jpg.ptcjvk.emz.8ji0wkvrgyrnqkqsrdirborvq.0.xz-aes`
+`mypicture.jpg.ptcjvk.emz.8ji0wkvrgyrnqkqsrdirborvq.0.enc`
 
 
 ## How to run
@@ -102,6 +102,10 @@ folders on the source storage.
 `lzma_level` - Optional. Compression level for LZMA when compressing files <=10MB. Default 6. 1 is fastest, 9 is slowest.
 
 `gzip_level` - Optional. Compression level for GZIP when compressing files >10MB. Default 6. 1 is fastest, 9 is slowest.
+
+`compress` - Optional. Enable or disable compression. Default true.
+
+`encrypt` - Optional. Enable or disable encryption. Default true.
 
 
 ## License

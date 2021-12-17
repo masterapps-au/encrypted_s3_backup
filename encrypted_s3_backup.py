@@ -244,16 +244,22 @@ def backup_object(index, config, src_storage, dest_storage, original_state):
         'Download failed for [%s]. Size mismatch. Expected %s, got %s!' % (
             original_state.storage_filename, original_state.size, original_size)
     
-    # compress the file using lzma (xz)
-    compressed_io = open_temp_io(original_size)
-    compress(original_io, compressed_io, 
-        lzma_level=config.get('lzma_level', 6), gzip_level=config.get('gzip_level', 6))
-    close_temp_io(original_io)
+    # compress the file using lzma (xz) or gzip
+    if config.get('compress', True):
+        compressed_io = open_temp_io(original_size)
+        compress(original_io, compressed_io, 
+            lzma_level=config.get('lzma_level', 6), gzip_level=config.get('gzip_level', 6))
+        close_temp_io(original_io)
+    else:
+        compressed_io = original_io
     
     # encrypt the data using aes-256-gcm
-    encrypted_io = open_temp_io(io_size(compressed_io))
-    aes_encrypt(compressed_io, encrypted_io, config['encryption_password'])
-    close_temp_io(compressed_io)
+    if config.get('encrypt', True):
+        encrypted_io = open_temp_io(io_size(compressed_io))
+        aes_encrypt(compressed_io, encrypted_io, config['encryption_password'])
+        close_temp_io(compressed_io)
+    else:
+        encrypted_io = compressed_io
     
     # write the encrypted file to the storage
     encrypted_filename = encrypted_file_state_to_encrypted_filename(
@@ -354,14 +360,20 @@ def restore_object(index, config, dest_storage, encrypted_state, encrypted_size,
     encrypted_io = dest_storage.read(encrypted_state.encrypted_filename, encrypted_size)
     
     # decrypt the data using aes-256-gcm
-    compressed_io = open_temp_io(io_size(encrypted_io))
-    aes_decrypt(encrypted_io, compressed_io, config['encryption_password'])
-    close_temp_io(encrypted_io)
+    if config.get('encrypt', True):
+        compressed_io = open_temp_io(io_size(encrypted_io))
+        aes_decrypt(encrypted_io, compressed_io, config['encryption_password'])
+        close_temp_io(encrypted_io)
+    else:
+        compressed_io = encrypted_io
     
-    # decompress the file using lzma (xz)
-    original_io = open_temp_io(io_size(compressed_io))
-    decompress(compressed_io, original_io)
-    close_temp_io(compressed_io)
+    # decompress the file using lzma (xz) or gzip
+    if config.get('compress', True):
+        original_io = open_temp_io(io_size(compressed_io))
+        decompress(compressed_io, original_io)
+        close_temp_io(compressed_io)
+    else:
+        original_io = compressed_io
     
     # verify the contents
     error = None
