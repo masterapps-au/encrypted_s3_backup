@@ -1,3 +1,4 @@
 boto3
 base36
 pycryptodome
+argon2-cffi

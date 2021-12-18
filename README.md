@@ -99,13 +99,18 @@ the destination (backup). Defaults to null (keep forever).
 `ignore_regex` - Optional. A list of regular expressions that can be used to ignore files or 
 folders on the source storage.
 
-`lzma_level` - Optional. Compression level for LZMA when compressing files <=10MB. Default 6. 1 is fastest, 9 is slowest.
+`lzma_level` - Optional. Compression level for LZMA when compressing files <=10MB. Default 6. 
+1 is fastest, 9 is slowest.
 
-`gzip_level` - Optional. Compression level for GZIP when compressing files >10MB. Default 6. 1 is fastest, 9 is slowest.
+`gzip_level` - Optional. Compression level for GZIP when compressing files >10MB. Default 6. 
+1 is fastest, 9 is slowest.
 
 `compress` - Optional. Enable or disable compression. Default true.
 
 `encrypt` - Optional. Enable or disable encryption. Default true.
+
+'encryption_type` - Optional. `aes` for AES-256-GCM with PBKDF2 100,000 iteration KDF. 
+`cha` for XChaCha20-Poly1305 with Argon2id KDF.
 
 
 ## License

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import argon2
+from argon2.profiles import RFC_9106_LOW_MEMORY
 import argparse
 import base36
 from botocore.client import Config
@@ -7,7 +9,7 @@ from botocore.exceptions import ClientError
 import boto3
 import calendar
 from collections import namedtuple
-from Crypto.Cipher import AES
+from Crypto.Cipher import AES, ChaCha20_Poly1305
 from Crypto.Hash import SHA512
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
@@ -256,7 +258,8 @@ def backup_object(index, config, src_storage, dest_storage, original_state):
     # encrypt the data using aes-256-gcm
     if config.get('encrypt', True):
         encrypted_io = open_temp_io(io_size(compressed_io))
-        aes_encrypt(compressed_io, encrypted_io, config['encryption_password'])
+        encrypt(compressed_io, encrypted_io, config['encryption_password'], 
+            encryption_type=config.get('encryption_type', 'aes'))
         close_temp_io(compressed_io)
     else:
         encrypted_io = compressed_io
@@ -362,7 +365,8 @@ def restore_object(index, config, dest_storage, encrypted_state, encrypted_size,
     # decrypt the data using aes-256-gcm
     if config.get('encrypt', True):
         compressed_io = open_temp_io(io_size(encrypted_io))
-        aes_decrypt(encrypted_io, compressed_io, config['encryption_password'])
+        decrypt(encrypted_io, compressed_io, config['encryption_password'],
+            encryption_type=config.get('encryption_type', 'aes'))
         close_temp_io(encrypted_io)
     else:
         compressed_io = encrypted_io
@@ -558,55 +562,69 @@ def decompress(from_io, to_io):
                 to_io.write(chunk)
 
 
-def get_aes_key(encryption_password, salt):
+def get_aes256_gcm_pbkdf2_cipher(encryption_password, salt, nonce):
     """
-    Derives an AES key from an encryption password and salt.
+    Returns a AES-GCM cipher, with PBKDF2-SHA512 KDF, for a given encryption password, 
+    salt and nonce.
     """
-    return PBKDF2(encryption_password, salt, 32, count=100000, hmac_hash_module=SHA512)
+    key = PBKDF2(encryption_password, salt, 32, count=100000, hmac_hash_module=SHA512)
+    return AES.new(key, AES.MODE_GCM, nonce)
 
 
-def get_aes_cipher(aes_key, nonce=None):
+def get_chacha20_poly1305_argon2_cipher(encryption_password, salt, nonce):
     """
-    Returns the AES-GCM cipher to use for a given AES key.
+    Returns a ChaCha20-Poly1305 cipher, with Argon2id KDF, for a given encryption password, 
+    salt and nonce.
     """
-    return AES.new(aes_key, AES.MODE_GCM, nonce)
+    key = argon2.low_level.hash_secret_raw(encryption_password.encode('utf-8'), salt, 
+        time_cost=RFC_9106_LOW_MEMORY.time_cost, memory_cost=RFC_9106_LOW_MEMORY.memory_cost, 
+        parallelism=RFC_9106_LOW_MEMORY.parallelism, hash_len=32, type=argon2.low_level.Type.ID)
+    return ChaCha20_Poly1305.new(key=key, nonce=nonce)
 
 
-def aes_encrypt(from_io, to_io, encryption_password):
+def encrypt(from_io, to_io, encryption_password, encryption_type='aes'):
     """
-    Encrypts a file-like object into another file-like object using AES.
+    Encrypts a file-like object into another file-like object.
     """
     from_io.seek(0)
     to_io.seek(0)
     
     salt = get_random_bytes(16)
-    aes_key = get_aes_key(encryption_password, salt)
-    cipher = get_aes_cipher(aes_key)
+    if encryption_type == 'aes':
+        nonce = get_random_bytes(16)
+        cipher = get_aes256_gcm_pbkdf2_cipher(encryption_password, salt, nonce)
+    elif encryption_type == 'cha':
+        nonce = get_random_bytes(24) # XChaCha20-Poly130 is 24
+        cipher = get_chacha20_poly1305_argon2_cipher(encryption_password, salt, nonce) 
     
     to_io.write(salt)
-    to_io.write(cipher.nonce)
+    to_io.write(nonce)
     to_io.seek(16, SEEK_CUR) # leave 16 bytes for the digest
     
     for chunk in read_chunks(from_io):
         to_io.write(cipher.encrypt(chunk))
     
-    to_io.seek(32)
+    to_io.seek(len(salt) + len(nonce))
     to_io.write(cipher.digest())
 
 
-def aes_decrypt(from_io, to_io, encryption_password):
+def decrypt(from_io, to_io, encryption_password, encryption_type='aes'):
     """
-    Decrypts a file-like object into another file-like object using AES.
+    Decrypts a file-like object into another file-like object.
     """
     from_io.seek(0)
     to_io.seek(0)
     
     salt = from_io.read(16)
-    nonce = from_io.read(16)
-    digest = from_io.read(16)
     
-    aes_key = get_aes_key(encryption_password, salt)
-    cipher = get_aes_cipher(aes_key, nonce)
+    if encryption_type == 'aes':
+        cipher = get_aes256_gcm_pbkdf2_cipher(encryption_password, salt, 
+            nonce=from_io.read(16))
+    elif encryption_type == 'cha':
+        cipher = get_chacha20_poly1305_argon2_cipher(encryption_password, salt, 
+            nonce=from_io.read(24))    
+    
+    digest = from_io.read(16)
     
     for chunk in read_chunks(from_io):
         to_io.write(cipher.decrypt(chunk))

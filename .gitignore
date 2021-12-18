@@ -3,3 +3,4 @@
 /.settings/
 /env/
 /config.json
+/__pycache__
