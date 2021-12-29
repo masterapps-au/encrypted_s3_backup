@@ -89,6 +89,15 @@ where to restore to, respectively. Each storage can be either a LocalStorage, or
 
 `encryption_password` - Required. The password to use to encrypt the destination (backup) files.
 
+`encryption_salt` - Recommended. Generate using the generate_salt.py command. Enables a single
+encryption key to be used across all files (and filenames if encrypt_filenames is enabled). This
+greatly speeds up initial backups, restores and filename encryption because key generation (KDF) 
+is only run once, instead of every file or filename. This comes with a slight reduction in security.
+
+`encrypt_filenames` - Optional. Encrypt filenames to ensure privacy. Default false. Recommended to use
+encryption_salt if you enable this feature, otherwise decryption of filenames will take a very long 
+time if you have a large number of files.
+
 `backup_processes` - Optional. The number of processes to use to backup files in parallel. Default 5.
 
 `restore_processes` - Optional. The number of processes to use to restore files in parallel. Default 8.

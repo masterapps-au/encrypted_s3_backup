@@ -1,4 +1,4 @@
 boto3
-base36
+mom
 pycryptodome
 argon2-cffi

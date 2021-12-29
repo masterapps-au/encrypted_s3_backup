@@ -3,7 +3,6 @@
 import argon2
 from argon2.profiles import RFC_9106_LOW_MEMORY
 import argparse
-import base36
 from botocore.client import Config
 from botocore.exceptions import ClientError
 import boto3
@@ -19,6 +18,7 @@ import hashlib
 from io import BytesIO, SEEK_CUR, SEEK_END
 import json
 import lzma
+from mom.codec import base36
 from multiprocessing import Pool
 import os
 from pathlib import Path, PurePath
@@ -31,6 +31,7 @@ ENCRYPTED_EXTENSION = 'enc'
 CHUNK_SIZE = 10 * 1024 * 1024 # 10MB chunks
 IN_MEMORY_MAX_SIZE = 100 * 1024 * 1024 # process files <= 100MB entirely in memory
 LZMA_MAX_SIZE = 10 * 1024 * 1024 # compress files > 10MB using gzip instead of lzma (for speed)
+DEFAULT_ENCRYPTION_TYPE = 'aes'
 
 
 #
@@ -65,7 +66,7 @@ class LocalStorage(object):
         self.path.mkdir(parents=True, exist_ok=True)
         return [str(p.relative_to(self.path)) 
             for p in self.path.rglob('*.%s' % extension if extension else '*')
-            if not p.is_dir()]
+            if p.is_file() and p.exists()]
     
     def list_iter(self, extension=None):
         """
@@ -202,9 +203,13 @@ class S3Storage(object):
         Internally used to return the boto3 bucket.
         """
         args = dict(self.s3_args)
-        signature_version = args.pop('signature_version')
-        s3 = boto3.resource('s3', **dict(args, 
-            config=Config(signature_version=signature_version) if signature_version else None))
+        config = Config(
+            retries={
+                'total_max_attempts': 10,
+                'mode': 'adaptive',
+                },
+            signature_version=args.pop('signature_version'))
+        s3 = boto3.resource('s3', **dict(args, config=config))
         return s3.Bucket(self.s3_bucket)
     
     def _list(self, extension=None):
@@ -234,7 +239,7 @@ def backup_object(index, config, src_storage, dest_storage, original_state):
     Downloads an object from the source storage, compresses and then encrypts 
     and stores it on the destination storage.
     """
-    print('[{0}] Backing up {1}...'.format(index + 1, original_state.storage_filename))
+    log('[{0}] Backing up {1}...'.format(index + 1, original_state.storage_filename))
     
     # download/read the original file from the source storage
     original_io = src_storage.read(original_state.storage_filename, original_state.size)
@@ -258,14 +263,15 @@ def backup_object(index, config, src_storage, dest_storage, original_state):
     # encrypt the data using aes-256-gcm
     if config.get('encrypt', True):
         encrypted_io = open_temp_io(io_size(compressed_io))
-        encrypt(compressed_io, encrypted_io, config['encryption_password'], 
-            encryption_type=config.get('encryption_type', 'aes'))
+        encrypt(compressed_io, encrypted_io, 
+            password=config.get('encryption_password'), key=config.get('encryption_key'), 
+            salt=config.get('encryption_salt'), encryption_type=config.get('encryption_type'))
         close_temp_io(compressed_io)
     else:
         encrypted_io = compressed_io
     
     # write the encrypted file to the storage
-    encrypted_filename = encrypted_file_state_to_encrypted_filename(
+    encrypted_filename = encrypted_file_state_to_encrypted_filename(config, 
         original_filename=original_state.storage_filename,
         last_modified=original_state.last_modified, 
         original_size=original_state.size, 
@@ -273,6 +279,22 @@ def backup_object(index, config, src_storage, dest_storage, original_state):
         deleted_date=0)
     dest_storage.write(encrypted_filename, encrypted_io)
     close_temp_io(encrypted_io)
+    
+    
+def remove_object(index, dest_storage, storage_filename, msg):
+    """
+    Removes an object from the destination storage.
+    """
+    log('[{0}] {1}'.format(index + 1, msg))
+    dest_storage.remove(storage_filename)
+    
+    
+def rename_object(index, dest_storage, from_storage_filename, to_storage_filename, msg):
+    """
+    Renames an object on the destination storage.
+    """
+    log('[{0}] {1}'.format(index + 1, msg))
+    dest_storage.rename(from_storage_filename, to_storage_filename)
 
 
 def do_backup(config, src_storage, dest_storage):
@@ -283,15 +305,15 @@ def do_backup(config, src_storage, dest_storage):
         processes = []
         
         # load all files on the storage and their state
-        print('Listing files on destination storage...')
+        log('Listing files on destination storage...')
         
         dest_storage_files = {s.original_filename: s 
-            for s in (encrypted_filename_to_encrypted_file_state(f) 
+            for s in (encrypted_filename_to_encrypted_file_state(config, f) 
                 for f in dest_storage.list(extension=ENCRYPTED_EXTENSION))}
         src_storage_files = set()
         ignore_regexes = [re.compile(r) for r in config.get('ignore_regex', [])]
         
-        print('Listing files on source storage and queuing downloads...')
+        log('Listing files on source storage and queuing downloads...')
         
         for i, original_state in enumerate(src_storage.list_iter()):
             if any(r.match(original_state.storage_filename) for r in ignore_regexes):
@@ -312,18 +334,20 @@ def do_backup(config, src_storage, dest_storage):
                 
                 # remove any old version of the file
                 if encrypted_state is not None:
-                    print('[{0}] Deleting old {1} ({2} bytes, modified {3}, deleted {4})...'.format(
-                        i + 1, original_state.storage_filename, encrypted_state.original_size, 
+                    msg = 'Deleting old {0} ({1} bytes, modified {2}, deleted {3})...'.format(
+                        original_state.storage_filename, encrypted_state.original_size, 
                         datetime.utcfromtimestamp(encrypted_state.last_modified), 
-                        encrypted_state.deleted_date))
-                    dest_storage.remove(encrypted_state.encrypted_filename)
+                        encrypted_state.deleted_date)
+                    processes.append(pool.apply_async(remove_object,
+                        [i, dest_storage, encrypted_state.encrypted_filename, msg]))
             
             # if the file has been deleted, then mark it as not deleted
             elif encrypted_state.deleted_date:
-                print('[{0}] Marking as undeleted {1}...'.format(i + 1, 
-                    original_state.storage_filename))
-                dest_storage.rename(encrypted_state.encrypted_filename, 
-                    encrypted_file_state_to_encrypted_filename(encrypted_state, deleted_date=0))
+                msg = 'Marking as undeleted {0}...'.format(original_state.storage_filename)
+                processes.append(pool.apply_async(rename_object,
+                    [i, dest_storage, encrypted_state.encrypted_filename, 
+                        encrypted_file_state_to_encrypted_filename(config, encrypted_state, 
+                            deleted_date=0), msg]))
         
         # mark all missing files that exist on the storage as deleted
         today = date.today()
@@ -338,16 +362,18 @@ def do_backup(config, src_storage, dest_storage):
                 if deleted_keep_days is not None:
                     days = (today - int_to_date(encrypted_state.deleted_date)).days
                     if days > deleted_keep_days:
-                        print('[{0}] Permanently deleting {1}...'.format(i + 1, original_filename))
-                        dest_storage.remove(encrypted_state.encrypted_filename)
+                        msg = 'Permanently deleting {0}...'.format(original_filename)
+                        processes.append(pool.apply_async(remove_object,
+                            [i, dest_storage, encrypted_state.encrypted_filename, msg]))
             else:
-                print('[{0}] Marking as deleted {1}...'.format(i + 1, original_filename))
-                dest_storage.rename(encrypted_state.encrypted_filename,
-                    encrypted_file_state_to_encrypted_filename(encrypted_state, 
-                        deleted_date=today_int))
+                msg = 'Marking as deleted {0}...'.format(original_filename)
+                processes.append(pool.apply_async(rename_object,
+                    [i, dest_storage, encrypted_state.encrypted_filename,
+                        encrypted_file_state_to_encrypted_filename(config, encrypted_state, 
+                            deleted_date=today_int), msg]))
         
         # wait for all processes to finish and raise any exceptions they raise
-        print('Listing complete! Waiting for backups to finish...')
+        log('Listing source complete! Waiting for backups to finish...')
         for process in processes:
             process.get() # re-raises any exceptions
 
@@ -357,16 +383,17 @@ def restore_object(index, config, dest_storage, encrypted_state, encrypted_size,
     """
     Restores an object from the destination storage to the restore storage.
     """
-    print('[{0}] Restoring {1}...'.format(index + 1, encrypted_state.original_filename))
+    log('[{0}] Restoring {1}...'.format(index + 1, encrypted_state.original_filename))
     
     # read the encrypted file
     encrypted_io = dest_storage.read(encrypted_state.encrypted_filename, encrypted_size)
     
-    # decrypt the data using aes-256-gcm
+    # decrypt the data using aes or cha
     if config.get('encrypt', True):
         compressed_io = open_temp_io(io_size(encrypted_io))
-        decrypt(encrypted_io, compressed_io, config['encryption_password'],
-            encryption_type=config.get('encryption_type', 'aes'))
+        decrypt(encrypted_io, compressed_io, 
+            password=config.get('encryption_password'), key=config.get('encryption_key'), 
+            salt=config.get('encryption_salt'), encryption_type=config.get('encryption_type'))
         close_temp_io(encrypted_io)
     else:
         compressed_io = encrypted_io
@@ -393,13 +420,13 @@ def restore_object(index, config, dest_storage, encrypted_state, encrypted_size,
     
     if error:
         if verify:
-            print('[{0}] {1}'.format(index + 1, error), file=sys.stderr)
+            log('[{0}] {1}'.format(index + 1, error), file=sys.stderr)
             return
         else:
             raise ValueError(error) # backup is corrupt, so bail
     
     if verify:
-        print('[{0}] OK'.format(index + 1))
+        log('[{0}] OK'.format(index + 1))
     else:
         # save the file to it's destination
         restore_storage.write(encrypted_state.original_filename, original_io)
@@ -414,10 +441,10 @@ def do_restore(config, dest_storage, restore_storage=None, restore_deleted=False
     with Pool(config.get('restore_processes', 8)) as pool:
         processes = []
         
-        print('Listing files on destination storage...')
+        log('Listing files on destination storage...')
         
         for i, storage_state in enumerate(dest_storage.list_iter(extension=ENCRYPTED_EXTENSION)):
-            encrypted_state = encrypted_filename_to_encrypted_file_state(
+            encrypted_state = encrypted_filename_to_encrypted_file_state(config, 
                 storage_state.storage_filename)
             
             if not verify and encrypted_state.deleted_date and not restore_deleted:
@@ -427,7 +454,7 @@ def do_restore(config, dest_storage, restore_storage=None, restore_deleted=False
                 encrypted_state, storage_state.size, restore_storage, verify]))            
         
         # wait for all processes to finish and raise any exceptions they raise
-        print('Listing complete! Waiting for restoration to finish...')
+        log('Listing complete! Waiting for restoration to finish...')
         for process in processes:
             process.get() # re-raises any exceptions        
 
@@ -435,23 +462,41 @@ def do_restore(config, dest_storage, restore_storage=None, restore_deleted=False
 #
 # Utility functions
 #
-def encrypted_filename_to_encrypted_file_state(encrypted_filename):
+def log(msg, file=None):
+    """
+    Log's a message.
+    """
+    print('[%s] %s' % (datetime.now().isoformat(timespec='seconds'), msg), file=file)
+
+
+def encrypted_filename_to_encrypted_file_state(config, encrypted_filename):
     """
     Splits the filename of an encrypted file into an EncryptedFileState.
     The state of an encrypted file is stored within it's filename.
     """
-    original_filename, last_modified, original_size, original_md5, deleted_date, extension = \
-        encrypted_filename.rsplit('.', 5)
+    encrypted_basename, extension = encrypted_filename.rsplit('.', 1)
     assert extension == ENCRYPTED_EXTENSION
+    
+    if config.get('encrypt_filenames', False):
+        try:
+            encrypted_basename = decrypt_str(b36decode(encrypted_basename), 
+                password=config.get('encryption_password'), key=config.get('encryption_key'), 
+                salt=config.get('encryption_salt'), encryption_type=config.get('encryption_type'))
+        except:
+            pass
+    
+    original_filename, last_modified, original_size, original_md5, deleted_date = \
+        encrypted_basename.rsplit('.', 4)
+    
     return EncryptedFileState(encrypted_filename=encrypted_filename,
         original_filename=original_filename,
-        last_modified=base36.loads(last_modified), 
-        original_size=base36.loads(original_size), 
-        original_md5=base36.loads(original_md5),
-        deleted_date=base36.loads(deleted_date))
+        last_modified=b36decode_int(last_modified), 
+        original_size=b36decode_int(original_size), 
+        original_md5=b36decode_int(original_md5),
+        deleted_date=b36decode_int(deleted_date))
 
 
-def encrypted_file_state_to_encrypted_filename(encrypted_state=None, **kwargs):
+def encrypted_file_state_to_encrypted_filename(config, encrypted_state=None, **kwargs):
     """
     Returns the filename that should be used to store the encrypted file on the storage.
     """
@@ -460,14 +505,20 @@ def encrypted_file_state_to_encrypted_filename(encrypted_state=None, **kwargs):
     elif kwargs:
         encrypted_state = EncryptedFileState(**kwargs)
     
-    return '.'.join([
+    encrypted_basename = '.'.join([
         encrypted_state.original_filename,
-        base36.dumps(encrypted_state.last_modified),
-        base36.dumps(encrypted_state.original_size),
-        base36.dumps(encrypted_state.original_md5),
-        base36.dumps(encrypted_state.deleted_date),
-        ENCRYPTED_EXTENSION,
+        b36encode_int(encrypted_state.last_modified),
+        b36encode_int(encrypted_state.original_size),
+        b36encode_int(encrypted_state.original_md5),
+        b36encode_int(encrypted_state.deleted_date),
         ])
+    
+    if config.get('encrypt_filenames', False):
+        encrypted_basename = b36encode(encrypt_str(encrypted_basename, 
+            password=config.get('encryption_password'), key=config.get('encryption_key'), 
+            salt=config.get('encryption_salt'), encryption_type=config.get('encryption_type')))
+    
+    return '%s.%s' % (encrypted_basename, ENCRYPTED_EXTENSION)
 
 
 def read_chunks(f):
@@ -562,40 +613,54 @@ def decompress(from_io, to_io):
                 to_io.write(chunk)
 
 
-def get_aes256_gcm_pbkdf2_cipher(encryption_password, salt, nonce):
+def pbkdf2_key(encryption_password, salt):
     """
-    Returns a AES-GCM cipher, with PBKDF2-SHA512 KDF, for a given encryption password, 
-    salt and nonce.
+    Generates an encryption key from a password using the PBKDF2-SHA512 kdf.
     """
-    key = PBKDF2(encryption_password, salt, 32, count=100000, hmac_hash_module=SHA512)
-    return AES.new(key, AES.MODE_GCM, nonce)
+    return PBKDF2(encryption_password, salt, 32, count=100000, hmac_hash_module=SHA512)
 
 
-def get_chacha20_poly1305_argon2_cipher(encryption_password, salt, nonce):
+def argon2_key(encryption_password, salt):
     """
-    Returns a ChaCha20-Poly1305 cipher, with Argon2id KDF, for a given encryption password, 
-    salt and nonce.
+    Generates an encryption key from a password using the Argon2id KDF.
     """
-    key = argon2.low_level.hash_secret_raw(encryption_password.encode('utf-8'), salt, 
+    return argon2.low_level.hash_secret_raw(encryption_password.encode('utf-8'), salt, 
         time_cost=RFC_9106_LOW_MEMORY.time_cost, memory_cost=RFC_9106_LOW_MEMORY.memory_cost, 
         parallelism=RFC_9106_LOW_MEMORY.parallelism, hash_len=32, type=argon2.low_level.Type.ID)
-    return ChaCha20_Poly1305.new(key=key, nonce=nonce)
 
 
-def encrypt(from_io, to_io, encryption_password, encryption_type='aes'):
+def encrypt_str(s, *args, **kwargs):
+    """
+    Like encrypt() but encrypts a string and returns the bytes.
+    """
+    from_io = BytesIO(s.encode('utf-8'))
+    to_io = BytesIO()
+    encrypt(from_io, to_io, *args, **kwargs)
+    return to_io.getvalue()
+
+
+def encrypt(from_io, to_io, password=None, key=None, salt=None, encryption_type=None):
     """
     Encrypts a file-like object into another file-like object.
     """
+    encryption_type = encryption_type or DEFAULT_ENCRYPTION_TYPE
+    
     from_io.seek(0)
     to_io.seek(0)
     
-    salt = get_random_bytes(16)
+    if key is None:
+        salt = get_random_bytes(16)
+        if encryption_type == 'aes':
+            key = pbkdf2_key(password, salt)
+        elif encryption_type == 'cha':
+            key = argon2_key(password, salt)
+    
     if encryption_type == 'aes':
         nonce = get_random_bytes(16)
-        cipher = get_aes256_gcm_pbkdf2_cipher(encryption_password, salt, nonce)
+        cipher = AES.new(key, AES.MODE_GCM, nonce)
     elif encryption_type == 'cha':
         nonce = get_random_bytes(24) # XChaCha20-Poly130 is 24
-        cipher = get_chacha20_poly1305_argon2_cipher(encryption_password, salt, nonce) 
+        cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)          
     
     to_io.write(salt)
     to_io.write(nonce)
@@ -608,22 +673,37 @@ def encrypt(from_io, to_io, encryption_password, encryption_type='aes'):
     to_io.write(cipher.digest())
 
 
-def decrypt(from_io, to_io, encryption_password, encryption_type='aes'):
+def decrypt_str(b, *args, **kwargs):
+    """
+    Like decrypt() but decrypts bytes and returns the string.
+    """
+    from_io = BytesIO(b)
+    to_io = BytesIO()
+    decrypt(from_io, to_io, *args, **kwargs)
+    return to_io.getvalue().decode('utf-8')
+
+
+def decrypt(from_io, to_io, password=None, key=None, salt=None, encryption_type=None):
     """
     Decrypts a file-like object into another file-like object.
     """
+    encryption_type = encryption_type or DEFAULT_ENCRYPTION_TYPE
+    
     from_io.seek(0)
     to_io.seek(0)
     
-    salt = from_io.read(16)
+    salt_ = from_io.read(16)
+    if key is None or salt_ != salt:
+        if encryption_type == 'aes':
+            key = pbkdf2_key(password, salt_)
+        elif encryption_type == 'cha':
+            key = argon2_key(password, salt_)    
     
     if encryption_type == 'aes':
-        cipher = get_aes256_gcm_pbkdf2_cipher(encryption_password, salt, 
-            nonce=from_io.read(16))
+        cipher = AES.new(key, AES.MODE_GCM, from_io.read(16))
     elif encryption_type == 'cha':
-        cipher = get_chacha20_poly1305_argon2_cipher(encryption_password, salt, 
-            nonce=from_io.read(24))    
-    
+        cipher = ChaCha20_Poly1305.new(key=key, nonce=from_io.read(24)) # XChaCha20-Poly130 is 24  
+        
     digest = from_io.read(16)
     
     for chunk in read_chunks(from_io):
@@ -650,6 +730,37 @@ def int_to_date(d):
     return datetime.strptime(str(d), '%Y%m%d').date()
 
 
+def b36encode(b):
+    """
+    Encodes bytes as a lowercase base36 string.
+    """
+    return base36.b36encode(b).decode('ascii').lower()
+
+
+def b36encode_int(i):
+    """
+    Encodes an integer as a lowercase base36 string.
+    """
+    h = '{:x}'.format(i)
+    if len(h) % 2:
+        h = '0' + h # ensure pairs
+    return b36encode(bytes.fromhex(h))
+
+
+def b36decode(s):
+    """
+    Decodes a lowercase base36 string to bytes.
+    """
+    return base36.b36decode(s.upper().encode('ascii'))
+
+
+def b36decode_int(s):
+    """
+    Decodes a lowercase base36 string to an integer.
+    """
+    return int(b36decode(s).hex(), 16)
+
+
 #
 # Main
 #
@@ -670,6 +781,17 @@ def main():
     
     with open(args.config, 'rb') as f:
         config = json.load(f)
+        
+        if config.get('encryption_salt'):
+            config['encryption_salt'] = bytes.fromhex(config['encryption_salt'])
+            
+            encryption_type = config.get('encryption_type') or DEFAULT_ENCRYPTION_TYPE
+            if encryption_type == 'aes':
+                config['encryption_key'] = pbkdf2_key(config['encryption_password'], 
+                    config['encryption_salt'])
+            elif encryption_type == 'cha':
+                config['encryption_key'] = argon2_key(config['encryption_password'], 
+                    config['encryption_salt'])
     
     if config['src'].get('local_path'):
         src_storage = LocalStorage(**config['src'])
@@ -698,7 +820,7 @@ def main():
         src_storage.init()
         do_backup(config, src_storage, dest_storage)
     
-    print('Done!')
+    log('Done!')
 
 
 if __name__ == '__main__':
