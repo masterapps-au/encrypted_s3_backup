@@ -188,15 +188,21 @@ class S3Storage(object):
         """
         Renames from a storage filename to another name.
         """
-        self._bucket().Object(str(self.base_path / to_storage_filename)).copy_from(CopySource={
-            'Bucket': self.s3_bucket, 'Key': str(self.base_path / from_storage_filename)})
-        self._bucket().Object(str(self.base_path / from_storage_filename)).delete()
+        from_source = {
+            'Bucket': self.s3_bucket,
+            'Key': str(self.base_path / from_storage_filename),
+            }
+        self._bucket().copy(from_source, str(self.base_path / to_storage_filename))
+        self._bucket().meta.client.delete_object(**from_source)
     
     def remove(self, storage_filename):
         """
         Removes a file from the storage.
         """
-        self._bucket().Object(str(self.base_path / storage_filename)).delete()
+        self._bucket().meta.client.delete_object(**{
+            'Bucket': self.s3_bucket,
+            'Key': str(self.base_path / storage_filename),
+            })
     
     def _bucket(self):
         """
@@ -307,9 +313,29 @@ def do_backup(config, src_storage, dest_storage):
         # load all files on the storage and their state
         log('Listing files on destination storage...')
         
-        dest_storage_files = {s.original_filename: s 
-            for s in (encrypted_filename_to_encrypted_file_state(config, f) 
-                for f in dest_storage.list(extension=ENCRYPTED_EXTENSION))}
+        dest_storage_files = {}
+        for s in (encrypted_filename_to_encrypted_file_state(config, f) 
+                for f in dest_storage.list(extension=ENCRYPTED_EXTENSION)):
+            dest_storage_files.setdefault(s.original_filename, []).append(s)
+        
+        # handle any conflicts (unlikely) which could occur when:
+        # - the storage has a deleted version, plus an undeleted version or
+        # - multiple deleted versions
+        # we always resolve by keeping the undeleted version or the latest deleted version
+        for original_filename, s_list in dest_storage_files.items():
+            if len(s_list) > 1:
+                for encrypted_state in sorted(s_list, 
+                        key=lambda s: s.deleted_date or sys.maxsize, reverse=True)[1:]:
+                    msg = 'Fixing conflict by deleting {0} ({1} bytes, modified {2}, deleted {3})...'.format(
+                        encrypted_state.original_filename, encrypted_state.original_size, 
+                        datetime.utcfromtimestamp(encrypted_state.last_modified), 
+                        encrypted_state.deleted_date)
+                    # as these shouldn't occur, perform synchronously to ensure 
+                    # completion before the backup starts
+                    remove_object(-2, dest_storage, encrypted_state.encrypted_filename, msg)
+            
+            dest_storage_files[original_filename] = s_list[0]
+        
         src_storage_files = set()
         ignore_regexes = [re.compile(r) for r in config.get('ignore_regex', [])]
         
