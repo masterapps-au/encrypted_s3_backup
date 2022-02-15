@@ -13,6 +13,7 @@ from Crypto.Hash import SHA512
 from Crypto.Protocol.KDF import PBKDF2
 from Crypto.Random import get_random_bytes
 from datetime import datetime, date
+from functools import reduce
 import gzip
 import hashlib
 from io import BytesIO, SEEK_CUR, SEEK_END
@@ -20,18 +21,38 @@ import json
 import lzma
 from mom.codec import base36
 from multiprocessing import Pool
+import operator
 import os
 from pathlib import Path, PurePath
 import re
 import sys
-from tempfile import NamedTemporaryFile, _TemporaryFileWrapper
+from tempfile import gettempdir, NamedTemporaryFile, _TemporaryFileWrapper
 
 
+#
+# Constants
+#
 ENCRYPTED_EXTENSION = 'enc'
 CHUNK_SIZE = 10 * 1024 * 1024 # 10MB chunks
 IN_MEMORY_MAX_SIZE = 100 * 1024 * 1024 # process files <= 100MB entirely in memory
 LZMA_MAX_SIZE = 10 * 1024 * 1024 # compress files > 10MB using gzip instead of lzma (for speed)
 DEFAULT_ENCRYPTION_TYPE = 'aes'
+
+STORAGES = [] # NOTE: populated below
+CONFIG_ALL = [
+    'encryption_password',
+    'encryption_salt',
+    'encrypt_filenames',
+    'backup_processes',
+    'restore_processes',
+    'deleted_keep_days',
+    'ignore_regex',
+    'lzma_level',
+    'gzip_level',
+    'compress',
+    'encrypt',
+    'encryption_type',    
+    ] # NOTE: extended by storages below
 
 
 #
@@ -44,12 +65,14 @@ EncryptedFileState = namedtuple('EncryptedFileState', ['encrypted_filename', 'or
 
 
 #
-# Classes
+# Storages
 #
 class LocalStorage(object):
     """
     Storage for the local file system. 
     """
+    ARGS = ['local_path']
+    
     def __init__(self, local_path):
         self.path = Path(local_path)
     
@@ -124,11 +147,16 @@ class LocalStorage(object):
         """
         os.remove(str(self.path / storage_filename))
 
+STORAGES.append(LocalStorage)
+
 
 class S3Storage(object):
     """
     Storage for an s3 bucket. 
     """
+    ARGS = ['aws_access_key_id', 'aws_secret_access_key', 's3_bucket', 'base_path', 'endpoint_url',
+        'signature_version', 'region_name']
+    
     def __init__(self, aws_access_key_id, aws_secret_access_key, s3_bucket, base_path=None,
             endpoint_url=None, signature_version=None, region_name=None):
         self.s3_args = {
@@ -150,6 +178,7 @@ class S3Storage(object):
         try:
             bucket.meta.client.head_bucket(Bucket=bucket.name)
         except ClientError:
+            log('Bucket "{0}" does not exist. Creating...'.format(bucket.name))
             bucket.meta.client.create_bucket(Bucket=bucket.name)
     
     def list(self, extension=None):
@@ -235,6 +264,14 @@ class S3Storage(object):
             p = PurePath(obj.key).relative_to(self.base_path)
             if extension is None or p.suffix == extension:
                 yield str(p), obj
+
+STORAGES.append(S3Storage)
+
+CONFIG_ALL.extend(
+    reduce(operator.add, [['src.%s' % a for a in s.ARGS] for s in STORAGES]) +
+    reduce(operator.add, [['dest.%s' % a for a in s.ARGS] for s in STORAGES]) +
+    reduce(operator.add, [['restore.%s' % a for a in s.ARGS] for s in STORAGES])
+    )
 
 
 #
@@ -792,8 +829,11 @@ def b36decode_int(s):
 #
 def main():
     """
-    Runs the backup.
+    Runs the backup, verify or restore.
     """
+    log('encrypted_s3_backup started.')
+    
+    # parse the command-line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', default='config.json',
         help='Specify the path to the config file.')
@@ -805,37 +845,57 @@ def main():
         help='Restore deleted files during the restore. Not enabled by default.')
     args = parser.parse_args()
     
-    with open(args.config, 'rb') as f:
-        config = json.load(f)
+    # load the configuration via environment variables, if any are set
+    config = {}
+    env_used = False
+    
+    for arg in CONFIG_ALL:
+        env_name = arg.upper().replace('.', '_')
         
-        if config.get('encryption_salt'):
-            config['encryption_salt'] = bytes.fromhex(config['encryption_salt'])
+        if os.environ.get(env_name):
+            env_used = True
             
-            encryption_type = config.get('encryption_type') or DEFAULT_ENCRYPTION_TYPE
-            if encryption_type == 'aes':
-                config['encryption_key'] = pbkdf2_key(config['encryption_password'], 
-                    config['encryption_salt'])
-            elif encryption_type == 'cha':
-                config['encryption_key'] = argon2_key(config['encryption_password'], 
-                    config['encryption_salt'])
+            if '.' in arg:
+                parent, arg = arg.split('.', 1)
+                obj = config.setdefault(parent, {})
+            else:
+                obj = config
+            
+            obj[arg] = os.environ[env_name]
     
-    if config['src'].get('local_path'):
-        src_storage = LocalStorage(**config['src'])
-    elif config['src'].get('s3_bucket'):
-        src_storage = S3Storage(**config['src'])
+    # if no environment variables were found, then load via the json config file
+    if not env_used:  
+        with open(args.config, 'rb') as f:
+            config = json.load(f)
     
-    if config['dest'].get('local_path'):
-        dest_storage = LocalStorage(**config['dest'])
-    elif config['dest'].get('s3_bucket'):
-        dest_storage = S3Storage(**config['dest'])
+    # generate the encryption key upfront if a fixed salt is used
+    if config.get('encryption_salt'):
+        config['encryption_salt'] = bytes.fromhex(config['encryption_salt'])
+        
+        encryption_type = config.get('encryption_type') or DEFAULT_ENCRYPTION_TYPE
+        if encryption_type == 'aes':
+            config['encryption_key'] = pbkdf2_key(config['encryption_password'], 
+                config['encryption_salt'])
+        elif encryption_type == 'cha':
+            config['encryption_key'] = argon2_key(config['encryption_password'], 
+                config['encryption_salt'])
     
-    if config['restore'].get('local_path'):
-        restore_storage = LocalStorage(**config['restore'])
-    elif config['restore'].get('s3_bucket'):
-        restore_storage = S3Storage(**config['restore'])
+    # load all storages
+    if not config.get('restore'):
+        config.setdefault('restore', {})['local_path'] = str(Path(gettempdir()) / 
+            'encrypted_s3_backup_restore')
+    
+    for storage_class in STORAGES:
+        if any(a in config['src'] for a in storage_class.ARGS):
+            src_storage = storage_class(**config['src'])
+        if any(a in config['dest'] for a in storage_class.ARGS):
+            dest_storage = storage_class(**config['dest'])
+        if any(a in config['restore'] for a in storage_class.ARGS):
+            restore_storage = storage_class(**config['restore'])
     
     dest_storage.init()
     
+    # perform the backup or restore
     if args.verify:
         do_restore(config, dest_storage, verify=True)
     elif args.restore:

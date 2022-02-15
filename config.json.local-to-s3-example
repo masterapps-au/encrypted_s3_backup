@@ -1,12 +1,11 @@
 {
   "src": {
+    "local_path": "/backup/files/from/here"
+  },
+  "dest": {
     "aws_access_key_id": "my_access_key",
     "aws_secret_access_key": "my_secret_key",
     "s3_bucket": "my-s3-bucket",
-    "base_path": "optional/backup/files/from/here/"
-  },
-  "dest": {
-    "local_path": "/backup/files/to/here"
   },
   "encryption_password": "my-encryption-password"
 }

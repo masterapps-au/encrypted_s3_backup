@@ -26,7 +26,7 @@ eg.
 `mypicture.jpg.ptcjvk.emz.8ji0wkvrgyrnqkqsrdirborvq.0.enc`
 
 
-## How to run
+## How to Run Locally
 
 1. Copy one of config.json.example files to config.json.
 
@@ -56,13 +56,51 @@ This protects someone deleting your files and a backup being taken.
 Any errors will be output to STDERR, which in the example above writes them to errors.log.
 
 
+## How to Automate Backups via Docker
+
+The included docker image contains cron and allows you to schedule encrypted_s3_backup to be run 
+periodically.
+
+How often cron runs is controlled via the `CRONTAB` environment variable. The default is `0 * * * *`,
+which means it will run on the hour, every hour.
+
+A minimal example which backs up the a local folder `/path/to/backup` to Amazon S3:
+
+`docker run -d --name encrypted_s3_backup
+  -e SRC_LOCAL_PATH=/data
+  -e DEST_AWS_ACCESS_KEY_ID=my_key -e DEST_AWS_SECRET_ACCESS_KEY=my_secret -e DEST_S3_BUCKET=my-bucket
+  -e ENCRYPTION_PASSWORD=my-encryption-password
+  -v /path/to/backup:/data
+  ghcr.io/masterapps-au/encrypted_s3_backup`
+
+Alternatively you can use the docker container to run the script directly to do a backup, 
+restore or verify. For example:
+
+`docker run -it --rm
+  -e SRC_LOCAL_PATH=/data
+  -e DEST_AWS_ACCESS_KEY_ID=my_key -e DEST_AWS_SECRET_ACCESS_KEY=my_secret -e DEST_S3_BUCKET=my-bucket
+  -e ENCRYPTION_PASSWORD=my-encryption-password
+  -v /path/to/backup:/data
+  ghcr.io/masterapps-au/encrypted_s3_backup
+  /encrypted_s3_backup.py --verify`
+
+Note: It is suggested you use the "Config Environment Variables" like in the examples above, to 
+avoid mounting a config.json file.
+
+
 ## Config File Format
+
+The structure of the config.json file. Alternatively you can set configuration values via environment
+variables. See "Config Environment Variables" below.
 
 
 ### Storages
 
 `src`, `dest`, and `restore` keys define a storage to use as the source, the destination and 
 where to restore to, respectively. Each storage can be either a LocalStorage, or S3Storage.
+
+`restore` is special in that it defaults to a `local_path` of `$TMPDIR/encrypted_s3_backup_restore` 
+if no `restore` is provided.
 
 **LocalStorage**
 
@@ -76,50 +114,98 @@ where to restore to, respectively. Each storage can be either a LocalStorage, or
 
 `s3_bucket` - Required. The bucket to read from or write files to.
 
-`base_path` - Optional. A path within the bucket to read from or write files to. Defaults to /.
+`base_path` - Optional. Defaults to /. A path within the bucket to read from or write files to.
 
-`endpoint_url` - Optional. A different S3 endpoint to use. Allows specifying other S3-like providers.
+`endpoint_url` - Optional. Default is null. A different S3 endpoint to use. Allows specifying other 
+S3-like providers.
 
-`signature_version` - Optional. Specify a specific S3 signature method to use.
+`signature_version` - Optional. Default is null. Specify a specific S3 signature method to use.
 
-`region_name` - Optional. Specify a specific S3 region to use.
+`region_name` - Optional. Default is null. Specify a specific S3 region to use.
 
 
 ### Other Settings
 
 `encryption_password` - Required. The password to use to encrypt the destination (backup) files.
 
-`encryption_salt` - Recommended. Generate using the generate_salt.py command. Enables a single
-encryption key to be used across all files (and filenames if encrypt_filenames is enabled). This
-greatly speeds up initial backups, restores and filename encryption because key generation (KDF) 
-is only run once, instead of every file or filename. This comes with a slight reduction in security.
+`encryption_salt` - Recommended. Default is null. Generate using the generate_salt.py command. 
+Enables a single encryption key to be used across all files (and filenames if encrypt_filenames is 
+enabled). This greatly speeds up initial backups, restores and filename encryption because key 
+generation (KDF) is only run once, instead of every file or filename. This comes with a slight 
+reduction in security.
 
-`encrypt_filenames` - Optional. Encrypt filenames to ensure privacy. Default false. Recommended to use
+`encrypt_filenames` - Optional. Default false. Encrypt filenames to ensure privacy. Recommended to use
 encryption_salt if you enable this feature, otherwise decryption of filenames will take a very long 
 time if you have a large number of files.
 
-`backup_processes` - Optional. The number of processes to use to backup files in parallel. Default 5.
+`backup_processes` - Optional. Default 5. The number of processes to use to backup files in parallel. 
 
-`restore_processes` - Optional. The number of processes to use to restore files in parallel. Default 8.
+`restore_processes` - Optional. Default 8. The number of processes to use to restore files in parallel. 
 
-`deleted_keep_days` - Optional. The number of days until deleted files are permanently deleted from 
-the destination (backup). Defaults to null (keep forever).
+`deleted_keep_days` - Optional. Default is null (keep forever). The number of days until deleted 
+files are permanently deleted from the destination (backup). 
 
-`ignore_regex` - Optional. A list of regular expressions that can be used to ignore files or 
-folders on the source storage.
+`ignore_regex` - Optional. Default is []. A list of regular expressions that can be used to ignore 
+files or folders on the source storage.
 
-`lzma_level` - Optional. Compression level for LZMA when compressing files <=10MB. Default 6. 
+`lzma_level` - Optional. Default 6. Compression level for LZMA when compressing files <=10MB.  
 1 is fastest, 9 is slowest.
 
-`gzip_level` - Optional. Compression level for GZIP when compressing files >10MB. Default 6. 
+`gzip_level` - Optional. Default 6. Compression level for GZIP when compressing files >10MB.
 1 is fastest, 9 is slowest.
 
-`compress` - Optional. Enable or disable compression. Default true.
+`compress` - Optional. Default true. Enable or disable compression.
 
-`encrypt` - Optional. Enable or disable encryption. Default true.
+`encrypt` - Optional. Default true. Enable or disable encryption.
 
-'encryption_type` - Optional. `aes` for AES-256-GCM with PBKDF2 100,000 iteration KDF. 
+`encryption_type` - Optional. Default aes. `aes` for AES-256-GCM with PBKDF2 100,000 iteration KDF. 
 `cha` for XChaCha20-Poly1305 with Argon2id KDF.
+
+
+## Config Environment Variables
+
+Config environment variables map directly to config.json keys, but are instead uppercase and 
+separated using _'s. For example, the full list of environment variables are:
+
+`SRC_LOCAL_PATH`
+`SRC_AWS_ACCESS_KEY_ID`
+`SRC_AWS_SECRET_ACCESS_KEY`
+`SRC_S3_BUCKET`
+`SRC_BASE_PATH`
+`SRC_ENDPOINT_URL`
+`SRC_SIGNATURE_VERSION`
+`SRC_REGION_NAME`
+
+`DEST_LOCAL_PATH`
+`DEST_AWS_ACCESS_KEY_ID`
+`DEST_AWS_SECRET_ACCESS_KEY`
+`DEST_S3_BUCKET`
+`DEST_BASE_PATH`
+`DEST_ENDPOINT_URL`
+`DEST_SIGNATURE_VERSION`
+`DEST_REGION_NAME`
+
+`RESTORE_LOCAL_PATH`
+`RESTORE_AWS_ACCESS_KEY_ID`
+`RESTORE_AWS_SECRET_ACCESS_KEY`
+`RESTORE_S3_BUCKET`
+`RESTORE_BASE_PATH`
+`RESTORE_ENDPOINT_URL`
+`RESTORE_SIGNATURE_VERSION`
+`RESTORE_REGION_NAME`
+
+`ENCRYPTION_PASSWORD`
+`ENCRYPTION_SALT`
+`ENCRYPT_FILENAMES`
+`BACKUP_PROCESSES`
+`RESTORE_PROCESSES`
+`DELETED_KEEP_DAYS`
+`IGNORE_REGEX`
+`LZMA_LEVEL`
+`GZIP_LEVEL`
+`COMPRESS`
+`ENCRYPT`
+`ENCRYPTION_TYPE`
 
 
 ## License

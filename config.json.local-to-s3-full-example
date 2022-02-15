@@ -1,0 +1,28 @@
+{
+  "src": {
+    "local_path": "/backup/files/from/here"
+  },
+  "dest": {
+    "aws_access_key_id": "my_access_key",
+    "aws_secret_access_key": "my_secret_key",
+    "s3_bucket": "my-s3-bucket",
+    "base_path": null,
+    "endpoint_url": null,
+    "signature_version": null,
+    "region_name": null    
+  },
+  "encryption_password": "my-encryption-password",
+  "encryption_salt": null,
+  "encrypt_filenames": false,
+  "backup_processes": 5,
+  "restore_processes": 8,
+  "deleted_keep_days": null,
+  "ignore_regex": [
+    "^optional/ignore/files/in/this/folder/"
+  ],
+  "lzma_level": 6,
+  "gzip_level": 6,
+  "compress": true,
+  "encrypt": true,
+  "encryption_type": "aes"  
+}
