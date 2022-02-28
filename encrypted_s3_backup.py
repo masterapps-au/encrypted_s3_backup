@@ -497,7 +497,8 @@ def restore_object(index, config, dest_storage, encrypted_state, encrypted_size,
     close_temp_io(original_io)
 
 
-def do_restore(config, dest_storage, restore_storage=None, restore_deleted=False, verify=False):
+def do_restore(config, dest_storage, restore_storage=None, restore_only=None, restore_deleted=False, 
+        verify=False):
     """
     Performs a restore from the storage to a directory, optionally including deleted files.
     """
@@ -510,6 +511,8 @@ def do_restore(config, dest_storage, restore_storage=None, restore_deleted=False
             encrypted_state = encrypted_filename_to_encrypted_file_state(config, 
                 storage_state.storage_filename)
             
+            if not verify and restore_only and encrypted_state.original_filename not in restore_only:
+                continue # only restore selected files
             if not verify and encrypted_state.deleted_date and not restore_deleted:
                 continue # skip deleted (except when verifying)
             
@@ -841,6 +844,8 @@ def main():
         help='Verifies the integrity of a backup by decrypting and verifying hashes.')
     parser.add_argument('--restore', action='store_true',
         help='Perform a restore instead of a backup.')
+    parser.add_argument('--restore-only', action='append',
+        help='Specifies file(s) to only restore. Other files will be ignored.')
     parser.add_argument('--restore-deleted', action='store_true',
         help='Restore deleted files during the restore. Not enabled by default.')
     args = parser.parse_args()
@@ -901,7 +906,7 @@ def main():
     elif args.restore:
         restore_storage.init()
         do_restore(config, dest_storage, restore_storage=restore_storage, 
-            restore_deleted=args.restore_deleted)
+            restore_only=args.restore_only, restore_deleted=args.restore_deleted)
     else:
         src_storage.init()
         do_backup(config, src_storage, dest_storage)
