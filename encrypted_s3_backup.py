@@ -295,16 +295,17 @@ def backup_object(index, config, src_storage, dest_storage, original_state):
             original_state.storage_filename, original_state.size, original_size)
     
     # compress the file using lzma (xz) or gzip
-    if config.get('compress', True):
+    if as_bool(config.get('compress', True)):
         compressed_io = open_temp_io(original_size)
         compress(original_io, compressed_io, 
-            lzma_level=config.get('lzma_level', 6), gzip_level=config.get('gzip_level', 6))
+            lzma_level=int(config.get('lzma_level') or 6), 
+            gzip_level=int(config.get('gzip_level') or 6))
         close_temp_io(original_io)
     else:
         compressed_io = original_io
     
     # encrypt the data using aes-256-gcm
-    if config.get('encrypt', True):
+    if as_bool(config.get('encrypt', True)):
         encrypted_io = open_temp_io(io_size(compressed_io))
         encrypt(compressed_io, encrypted_io, 
             password=config.get('encryption_password'), key=config.get('encryption_key'), 
@@ -344,7 +345,7 @@ def do_backup(config, src_storage, dest_storage):
     """
     Performs a backup to the storage.
     """
-    with Pool(config.get('backup_processes', 5)) as pool:
+    with Pool(int(config.get('backup_processes') or 5)) as pool:
         processes = []
         
         # load all files on the storage and their state
@@ -424,7 +425,7 @@ def do_backup(config, src_storage, dest_storage):
                 # previously deleted, so check whether its expired and is to be permanently deleted
                 if deleted_keep_days is not None:
                     days = (today - int_to_date(encrypted_state.deleted_date)).days
-                    if days > deleted_keep_days:
+                    if days > int(deleted_keep_days):
                         msg = 'Permanently deleting {0}...'.format(original_filename)
                         processes.append(pool.apply_async(remove_object,
                             [i, dest_storage, encrypted_state.encrypted_filename, msg]))
@@ -452,7 +453,7 @@ def restore_object(index, config, dest_storage, encrypted_state, encrypted_size,
     encrypted_io = dest_storage.read(encrypted_state.encrypted_filename, encrypted_size)
     
     # decrypt the data using aes or cha
-    if config.get('encrypt', True):
+    if as_bool(config.get('encrypt', True)):
         compressed_io = open_temp_io(io_size(encrypted_io))
         decrypt(encrypted_io, compressed_io, 
             password=config.get('encryption_password'), key=config.get('encryption_key'), 
@@ -462,7 +463,7 @@ def restore_object(index, config, dest_storage, encrypted_state, encrypted_size,
         compressed_io = encrypted_io
     
     # decompress the file using lzma (xz) or gzip
-    if config.get('compress', True):
+    if as_bool(config.get('compress', True)):
         original_io = open_temp_io(io_size(compressed_io))
         decompress(compressed_io, original_io)
         close_temp_io(compressed_io)
@@ -502,7 +503,7 @@ def do_restore(config, dest_storage, restore_storage=None, restore_only=None, re
     """
     Performs a restore from the storage to a directory, optionally including deleted files.
     """
-    with Pool(config.get('restore_processes', 8)) as pool:
+    with Pool(int(config.get('restore_processes') or 8)) as pool:
         processes = []
         
         log('Listing files on destination storage...')
@@ -535,6 +536,15 @@ def log(msg, file=None):
     print('[%s] %s' % (datetime.now().isoformat(timespec='seconds'), msg), file=file)
 
 
+def as_bool(v):
+    """
+    Returns a value as a boolean value. Handles strings that represent boolean values.
+    """
+    if isinstance(v, str):
+        return v.lower() not in ('no', 'false', 'n', 'f', '0', '')
+    return bool(v)
+
+
 def encrypted_filename_to_encrypted_file_state(config, encrypted_filename):
     """
     Splits the filename of an encrypted file into an EncryptedFileState.
@@ -543,7 +553,7 @@ def encrypted_filename_to_encrypted_file_state(config, encrypted_filename):
     encrypted_basename, extension = encrypted_filename.rsplit('.', 1)
     assert extension == ENCRYPTED_EXTENSION
     
-    if config.get('encrypt_filenames', False):
+    if as_bool(config.get('encrypt_filenames', False)):
         try:
             encrypted_basename = decrypt_str(b36decode(encrypted_basename), 
                 password=config.get('encryption_password'), key=config.get('encryption_key'), 
@@ -579,7 +589,7 @@ def encrypted_file_state_to_encrypted_filename(config, encrypted_state=None, **k
         b36encode_int(encrypted_state.deleted_date),
         ])
     
-    if config.get('encrypt_filenames', False):
+    if as_bool(config.get('encrypt_filenames', False)):
         encrypted_basename = b36encode(encrypt_str(encrypted_basename, 
             password=config.get('encryption_password'), key=config.get('encryption_key'), 
             salt=config.get('encryption_salt'), encryption_type=config.get('encryption_type')))
