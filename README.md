@@ -1,8 +1,8 @@
 # encrypted_s3_backup
 
 encrypted_s3_backup is a fast multi-threaded backup script that backs up files in a 
-compressed (XZ/GZIP) and encrypted format (AES-256-GCM). Files can be backed up to or from S3 or 
-local storage. It requires Python 3.5+.
+compressed (XZ/GZIP) and encrypted format (AES-256-GCM or XChaCha20-Poly1305). 
+Files can be backed up to or from S3 or local storage. It requires Python 3.5+.
 
 It has the following features:
 

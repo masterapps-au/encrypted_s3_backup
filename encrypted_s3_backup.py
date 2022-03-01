@@ -735,7 +735,7 @@ def encrypt(from_io, to_io, password=None, key=None, salt=None, encryption_type=
         nonce = get_random_bytes(16)
         cipher = AES.new(key, AES.MODE_GCM, nonce)
     elif encryption_type == 'cha':
-        nonce = get_random_bytes(24) # XChaCha20-Poly130 is 24
+        nonce = get_random_bytes(24) # XChaCha20-Poly1305 is 24
         cipher = ChaCha20_Poly1305.new(key=key, nonce=nonce)          
     
     to_io.write(salt)
