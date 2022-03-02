@@ -5,5 +5,5 @@ RUN apt-get update && \
   rm -rf /etc/cron.*/*
 COPY encrypted_s3_backup.py requirements.txt entrypoint.sh /
 RUN pip3 install -r /requirements.txt && \
-  chmod u+x /entrypoint.sh
+  chmod u+x /encrypted_s3_backup.py /entrypoint.sh
 CMD ["/entrypoint.sh"]
