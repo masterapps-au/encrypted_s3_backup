@@ -533,7 +533,7 @@ def log(msg, file=None):
     """
     Log's a message.
     """
-    print('[%s] %s' % (datetime.now().isoformat(timespec='seconds'), msg), file=file)
+    print('[%s] %s' % (datetime.now().isoformat(timespec='seconds'), msg), file=file, flush=True)
 
 
 def as_bool(v):
