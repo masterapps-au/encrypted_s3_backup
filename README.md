@@ -11,7 +11,8 @@ It has the following features:
 - Integrity during restoration is ensured using hashes.
 
 - It uses no state files, lock files, databases, or metadata. Everything is stored in the 
-destination (backup) filename. This makes it file system agnostic and ensures writes are atomic.
+destination filename. This makes it file system agnostic, ensures writes are atomic, and best of all
+no corrupted backups!
 
 - Handles files of unlimited size by streaming all large operations to disk (> 100MB).
 
@@ -24,6 +25,8 @@ destination (backup) filename. This makes it file system agnostic and ensures wr
 eg.
 
 `mypicture.jpg.ptcjvk.emz.8ji0wkvrgyrnqkqsrdirborvq.0.enc`
+
+- Filenames can optionally be encrypted for extra privacy.
 
 
 ## How to Run Locally
