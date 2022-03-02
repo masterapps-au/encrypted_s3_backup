@@ -131,19 +131,19 @@ S3-like providers.
 
 `encryption_password` - Required. The password to use to encrypt the destination (backup) files.
 
-`encryption_salt` - Recommended. Default is null. Generate using the generate_salt.py command. 
-Enables a single encryption key to be used across all files (and filenames if encrypt_filenames is 
-enabled). This greatly speeds up initial backups, restores and filename encryption because key 
-generation (KDF) is only run once, instead of every file or filename. This comes with a slight 
-reduction in security.
+`encryption_salt` - Recommended if using filename encryption, or if you have large number of small files. 
+Default is null. Generate using the generate_salt.py command. Enables a single encryption key to be 
+used across all files (and filenames if encrypt_filenames is enabled). This greatly speeds up initial 
+backups, restores and filename encryption because key generation (KDF) is only run once, 
+instead of every file or filename. This comes with a slight reduction in security.
 
 `encrypt_filenames` - Optional. Default false. Encrypt filenames to ensure privacy. Recommended to use
 encryption_salt if you enable this feature, otherwise decryption of filenames will take a very long 
 time if you have a large number of files.
 
-`backup_processes` - Optional. Default 5. The number of processes to use to backup files in parallel. 
+`backup_processes` - Optional. Default 4. The number of processes to use to backup files in parallel. 
 
-`restore_processes` - Optional. Default 8. The number of processes to use to restore files in parallel. 
+`restore_processes` - Optional. Default 4. The number of processes to use to restore files in parallel. 
 
 `deleted_keep_days` - Optional. Default is null (keep forever). The number of days until deleted 
 files are permanently deleted from the destination (backup). 

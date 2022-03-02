@@ -345,7 +345,7 @@ def do_backup(config, src_storage, dest_storage):
     """
     Performs a backup to the storage.
     """
-    with Pool(int(config.get('backup_processes') or 5)) as pool:
+    with Pool(int(config.get('backup_processes') or 4)) as pool:
         processes = []
         
         # load all files on the storage and their state
@@ -503,7 +503,7 @@ def do_restore(config, dest_storage, restore_storage=None, restore_only=None, re
     """
     Performs a restore from the storage to a directory, optionally including deleted files.
     """
-    with Pool(int(config.get('restore_processes') or 8)) as pool:
+    with Pool(int(config.get('restore_processes') or 4)) as pool:
         processes = []
         
         log('Listing files on destination storage...')
