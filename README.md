@@ -126,6 +126,10 @@ S3-like providers.
 
 `region_name` - Optional. Default is null. Specify a specific S3 region to use.
 
+`storage_class` - Optional. Default is null. The storage class that new objects should receive. 
+Must be one of STANDARD, REDUCED_REDUNDANCY, STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING, 
+GLACIER, DEEP_ARCHIVE, OUTPOSTS or GLACIER_IR.
+
 
 ### Other Settings
 
@@ -178,6 +182,7 @@ separated using _'s. For example, the full list of environment variables are:
 `SRC_ENDPOINT_URL`
 `SRC_SIGNATURE_VERSION`
 `SRC_REGION_NAME`
+`SRC_STORAGE_CLASS`
 
 `DEST_LOCAL_PATH`
 `DEST_AWS_ACCESS_KEY_ID`
@@ -187,6 +192,7 @@ separated using _'s. For example, the full list of environment variables are:
 `DEST_ENDPOINT_URL`
 `DEST_SIGNATURE_VERSION`
 `DEST_REGION_NAME`
+`DEST_STORAGE_CLASS`
 
 `RESTORE_LOCAL_PATH`
 `RESTORE_AWS_ACCESS_KEY_ID`
@@ -196,6 +202,7 @@ separated using _'s. For example, the full list of environment variables are:
 `RESTORE_ENDPOINT_URL`
 `RESTORE_SIGNATURE_VERSION`
 `RESTORE_REGION_NAME`
+`RESTORE_STORAGE_CLASS`
 
 `ENCRYPTION_PASSWORD`
 `ENCRYPTION_SALT`

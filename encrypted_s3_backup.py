@@ -155,10 +155,11 @@ class S3Storage(object):
     Storage for an s3 bucket. 
     """
     ARGS = ['aws_access_key_id', 'aws_secret_access_key', 's3_bucket', 'base_path', 'endpoint_url',
-        'signature_version', 'region_name']
+        'signature_version', 'region_name', 'storage_class']
     
     def __init__(self, aws_access_key_id, aws_secret_access_key, s3_bucket, base_path=None,
-            endpoint_url=None, signature_version=None, region_name=None):
+            endpoint_url=None, signature_version=None, region_name=None,
+            storage_class=None):
         self.s3_args = {
             'aws_access_key_id': aws_access_key_id, 
             'aws_secret_access_key': aws_secret_access_key,
@@ -168,6 +169,7 @@ class S3Storage(object):
             }
         self.s3_bucket = s3_bucket
         self.base_path = PurePath((base_path or '').lstrip('/'))
+        self.storage_class = storage_class
     
     def init(self):
         """
@@ -202,8 +204,9 @@ class S3Storage(object):
         Atomically write the data to the storage.
         """
         f.seek(0)
-        self._bucket().upload_fileobj(f, str(self.base_path / storage_filename))
-        
+        args = {'ExtraArgs': {'StorageClass': self.storage_class}} if self.storage_class else {}
+        self._bucket().upload_fileobj(f, str(self.base_path / storage_filename), **args)
+    
     def read(self, storage_filename, size_hint):
         """
         Returns the data of the storage file as a file-like object.
@@ -221,7 +224,8 @@ class S3Storage(object):
             'Bucket': self.s3_bucket,
             'Key': str(self.base_path / from_storage_filename),
             }
-        self._bucket().copy(from_source, str(self.base_path / to_storage_filename))
+        args = {'ExtraArgs': {'StorageClass': self.storage_class}} if self.storage_class else {}
+        self._bucket().copy(from_source, str(self.base_path / to_storage_filename), **args)
         self._bucket().meta.client.delete_object(**from_source)
     
     def remove(self, storage_filename):
