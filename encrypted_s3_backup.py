@@ -422,7 +422,7 @@ def do_backup(config, src_storage, dest_storage):
         today_int = date_to_int(today)
         deleted_keep_days = config.get('deleted_keep_days')
         
-        for original_filename in set(dest_storage_files) - src_storage_files:
+        for i, original_filename in enumerate(set(dest_storage_files) - src_storage_files):
             encrypted_state = dest_storage_files[original_filename]
             
             if encrypted_state.deleted_date:
