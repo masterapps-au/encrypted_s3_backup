@@ -425,14 +425,15 @@ def do_backup(config, src_storage, dest_storage):
         for i, original_filename in enumerate(set(dest_storage_files) - src_storage_files):
             encrypted_state = dest_storage_files[original_filename]
             
-            if encrypted_state.deleted_date:
-                # previously deleted, so check whether its expired and is to be permanently deleted
-                if deleted_keep_days is not None:
-                    days = (today - int_to_date(encrypted_state.deleted_date)).days
-                    if days > int(deleted_keep_days):
-                        msg = 'Permanently deleting {0}...'.format(original_filename)
-                        processes.append(pool.apply_async(remove_object,
-                            [i, dest_storage, encrypted_state.encrypted_filename, msg]))
+            if deleted_keep_days is not None and (
+                    int(deleted_keep_days) == 0 or 
+                    (encrypted_state.deleted_date and 
+                        (today - int_to_date(encrypted_state.deleted_date)).days > 
+                            int(deleted_keep_days))):
+                # deleted_keep_days are 0, or previously marked deleted and now expired, so delete
+                msg = 'Permanently deleting {0}...'.format(original_filename)
+                processes.append(pool.apply_async(remove_object,
+                    [i, dest_storage, encrypted_state.encrypted_filename, msg]))
             else:
                 msg = 'Marking as deleted {0}...'.format(original_filename)
                 processes.append(pool.apply_async(rename_object,
